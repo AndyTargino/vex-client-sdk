@@ -1,71 +1,77 @@
 # VEX Client SDK
 
-SDK cliente compatível com Baileys para conexão com o VEX Microservice. Permite integrar aplicações com o WhatsApp de forma simples e escalável, utilizando a mesma interface do Baileys.
+Baileys-compatible SDK client for connecting to VEX WhatsApp Microservice. Integrate your applications with WhatsApp in a simple and scalable way, using the same Baileys interface you already know.
 
-## Instalação
+> **Server Access:** The VEX Server (backend with Baileys) is a private service. To get access to the server that powers this SDK, please contact: **andytargino@outlook.com**
+
+## Installation
 
 ```bash
-npm install @vex/client-sdk
+# From GitHub (recommended)
+npm install github:AndyTargino/vex-client-sdk
+
+# Specific version
+npm install github:AndyTargino/vex-client-sdk#v1.1.0
 ```
 
-## Início Rápido
+## Quick Start
 
 ```typescript
 import { makeWASocket } from '@vex/client-sdk';
 
-// Criar cliente VEX
+// Create VEX client
 const sock = makeWASocket({
-    url: 'http://localhost:5342',
-    apiKey: 'sua-api-key',
-    webhookUrl: 'http://seu-servidor.com/webhook'
+    url: 'https://your-vex-server.com',
+    apiKey: 'your-api-key',
+    webhookUrl: 'https://your-app.com/webhook'
 });
 
-// Aguardar inicialização
+// Wait for initialization
 await sock.waitForInit();
 
-// Escutar eventos
+// Listen to events
 sock.ev.on('connection.update', (update) => {
     if (update.qrCode) {
-        console.log('Escaneie o QR Code:', update.qrCode);
+        console.log('Scan the QR Code:', update.qrCode);
     }
     if (update.connection === 'open') {
-        console.log('Conectado!');
+        console.log('Connected!');
     }
 });
 
-// Enviar mensagem
+// Send a message
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    text: 'Olá do VEX SDK!'
+    text: 'Hello from VEX SDK!'
 });
 ```
 
-## Configuração
+## Configuration
 
 ### VexClientConfig
 
-| Propriedade | Tipo | Obrigatório | Descrição |
-|-------------|------|-------------|-----------|
-| `url` | `string` | Sim | URL do VEX Microservice |
-| `apiKey` | `string` | Sim | Chave de API (API_SECRET_KEY) |
-| `webhookUrl` | `string` | Sim | URL para receber eventos via webhook |
-| `token` | `string` | Não | UUID de sessão existente (para reconectar) |
-| `webhookSecret` | `string` | Não | Secret para validação do webhook |
-| `metadata` | `object` | Não | Metadados customizados da sessão |
-| `retry.maxRetries` | `number` | Não | Máximo de tentativas (padrão: 5) |
-| `retry.baseDelay` | `number` | Não | Delay base em ms (padrão: 1000) |
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `url` | `string` | Yes | VEX Microservice URL |
+| `apiKey` | `string` | Yes | API Key (API_SECRET_KEY) |
+| `webhookUrl` | `string` | Yes | URL to receive webhook events |
+| `token` | `string` | No | Existing session UUID (for reconnection) |
+| `webhookSecret` | `string` | No | Secret for webhook validation |
+| `metadata` | `object` | No | Custom session metadata |
+| `retry.maxRetries` | `number` | No | Max retry attempts (default: 5) |
+| `retry.baseDelay` | `number` | No | Base delay in ms (default: 1000) |
 
-### Exemplo Completo de Configuração
+### Full Configuration Example
 
 ```typescript
 const sock = makeWASocket({
-    url: 'http://localhost:5342',
+    url: 'https://your-vex-server.com',
     apiKey: process.env.VEX_API_KEY,
-    webhookUrl: 'https://meu-app.com/webhook',
-    webhookSecret: 'meu-secret-seguro',
-    token: 'uuid-sessao-existente', // opcional
+    webhookUrl: 'https://my-app.com/webhook',
+    webhookSecret: 'my-secure-secret',
+    token: 'existing-session-uuid', // optional
     metadata: {
-        empresa: 'Minha Empresa',
-        plano: 'premium'
+        company: 'My Company',
+        plan: 'premium'
     },
     retry: {
         maxRetries: 3,
@@ -74,45 +80,45 @@ const sock = makeWASocket({
 });
 ```
 
-## Propriedades do Cliente
+## Client Properties
 
-| Propriedade | Tipo | Descrição |
-|-------------|------|-----------|
-| `ev` | `EventEmitter` | Emissor de eventos compatível com Baileys |
-| `user` | `{ id: string; name?: string }` | Dados do usuário conectado |
-| `sessionId` | `string` | UUID da sessão |
-| `connectionStatus` | `'connecting' \| 'open' \| 'close' \| 'qrcode'` | Status da conexão |
+| Property | Type | Description |
+|----------|------|-------------|
+| `ev` | `EventEmitter` | Baileys-compatible event emitter |
+| `user` | `{ id: string; name?: string }` | Connected user data |
+| `sessionId` | `string` | Session UUID |
+| `connectionStatus` | `'connecting' \| 'open' \| 'close' \| 'qrcode'` | Connection status |
 
 ---
 
-## Métodos
+## Methods
 
-### Sessão
+### Session
 
 #### `waitForInit(): Promise<void>`
-Aguarda a inicialização completa do cliente.
+Wait for complete client initialization.
 
 ```typescript
 await sock.waitForInit();
-console.log('Cliente inicializado!');
+console.log('Client initialized!');
 ```
 
 #### `reconnect(): Promise<void>`
-Reconecta uma sessão existente.
+Reconnect an existing session.
 
 ```typescript
 await sock.reconnect();
 ```
 
 #### `logout(): Promise<void>`
-Desconecta e invalida a sessão.
+Disconnect and invalidate the session.
 
 ```typescript
 await sock.logout();
 ```
 
 #### `getSessionInfo(): Promise<SessionInfo | null>`
-Obtém informações da sessão atual.
+Get current session information.
 
 ```typescript
 const info = await sock.getSessionInfo();
@@ -128,7 +134,7 @@ console.log(info);
 ```
 
 #### `getStats(): Promise<SessionStats | null>`
-Obtém estatísticas do SQLite da sessão.
+Get session SQLite statistics.
 
 ```typescript
 const stats = await sock.getStats();
@@ -142,46 +148,46 @@ console.log(stats);
 ```
 
 #### `forceCleanup(): Promise<CleanupResult | null>`
-Força limpeza de credenciais antigas.
+Force cleanup of old credentials.
 
 ```typescript
 const result = await sock.forceCleanup();
-console.log(`Removidos: ${result.total} registros`);
+console.log(`Removed: ${result.total} records`);
 ```
 
 ---
 
-### Mensagens
+### Messages
 
 #### `sendMessage(jid, content, options?): Promise<WebMessageInfo>`
-Envia uma mensagem para um contato ou grupo.
+Send a message to a contact or group.
 
 ```typescript
-// Texto simples
+// Simple text
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    text: 'Olá!'
+    text: 'Hello!'
 });
 
-// Imagem
+// Image
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    image: { url: 'https://exemplo.com/imagem.jpg' },
-    caption: 'Veja esta imagem!'
+    image: { url: 'https://example.com/image.jpg' },
+    caption: 'Check this image!'
 });
 
-// Documento
+// Document
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    document: { url: 'https://exemplo.com/arquivo.pdf' },
-    fileName: 'documento.pdf',
+    document: { url: 'https://example.com/file.pdf' },
+    fileName: 'document.pdf',
     mimetype: 'application/pdf'
 });
 
-// Áudio
+// Audio
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    audio: { url: 'https://exemplo.com/audio.mp3' },
+    audio: { url: 'https://example.com/audio.mp3' },
     mimetype: 'audio/mp3'
 });
 
-// Localização
+// Location
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
     location: {
         degreesLatitude: -23.5505,
@@ -189,33 +195,33 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
     }
 });
 
-// Contato
+// Contact
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
     contacts: {
-        displayName: 'João Silva',
+        displayName: 'John Doe',
         contacts: [{
-            vcard: 'BEGIN:VCARD\nVERSION:3.0\nFN:João Silva\nTEL:+5511999999999\nEND:VCARD'
+            vcard: 'BEGIN:VCARD\nVERSION:3.0\nFN:John Doe\nTEL:+5511999999999\nEND:VCARD'
         }]
     }
 });
 
-// Responder mensagem
+// Reply to message
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    text: 'Esta é uma resposta!'
+    text: 'This is a reply!'
 }, {
-    quoted: mensagemOriginal
+    quoted: originalMessage
 });
 ```
 
 #### `sendText(jid, text): Promise<WebMessageInfo>`
-Atalho para enviar texto simples.
+Shortcut for sending plain text.
 
 ```typescript
-await sock.sendText('5511999999999@s.whatsapp.net', 'Mensagem rápida!');
+await sock.sendText('5511999999999@s.whatsapp.net', 'Quick message!');
 ```
 
 #### `readMessages(keys): Promise<void>`
-Marca mensagens como lidas.
+Mark messages as read.
 
 ```typescript
 await sock.readMessages([
@@ -228,29 +234,29 @@ await sock.readMessages([
 ```
 
 #### `sendReaction(jid, messageId, emoji, fromMe?): Promise<void>`
-Reage a uma mensagem com emoji.
+React to a message with an emoji.
 
 ```typescript
-// Adicionar reação
+// Add reaction
 await sock.sendReaction(
     '5511999999999@s.whatsapp.net',
     'ABC123',
     '👍'
 );
 
-// Remover reação
+// Remove reaction
 await sock.sendReaction(
     '5511999999999@s.whatsapp.net',
     'ABC123',
-    '' // string vazia remove
+    '' // empty string removes
 );
 ```
 
 #### `deleteMessage(jid, messageId, fromMe?, forEveryone?): Promise<void>`
-Deleta uma mensagem.
+Delete a message.
 
 ```typescript
-// Deletar para todos
+// Delete for everyone
 await sock.deleteMessage(
     '5511999999999@s.whatsapp.net',
     'ABC123',
@@ -258,7 +264,7 @@ await sock.deleteMessage(
     true   // forEveryone
 );
 
-// Deletar só para mim
+// Delete only for me
 await sock.deleteMessage(
     '5511999999999@s.whatsapp.net',
     'ABC123',
@@ -269,10 +275,10 @@ await sock.deleteMessage(
 
 ---
 
-### Contatos
+### Contacts
 
 #### `onWhatsApp(...jids): Promise<{ exists: boolean; jid: string }[]>`
-Verifica se números existem no WhatsApp.
+Check if phone numbers exist on WhatsApp.
 
 ```typescript
 const results = await sock.onWhatsApp(
@@ -281,27 +287,27 @@ const results = await sock.onWhatsApp(
 );
 
 results.forEach(r => {
-    console.log(`${r.jid}: ${r.exists ? 'Existe' : 'Não existe'}`);
+    console.log(`${r.jid}: ${r.exists ? 'Exists' : 'Does not exist'}`);
 });
 ```
 
 #### `getContacts(options?): Promise<{ total: number; contacts: Contact[] }>`
-Lista todos os contatos sincronizados.
+List all synced contacts.
 
 ```typescript
-// Todos os contatos
+// All contacts
 const { contacts, total } = await sock.getContacts();
 
-// Com paginação
+// With pagination
 const page = await sock.getContacts({
     limit: 50,
     offset: 0,
-    search: 'João'
+    search: 'John'
 });
 ```
 
 #### `getContact(contactId): Promise<Contact | null>`
-Obtém um contato específico.
+Get a specific contact.
 
 ```typescript
 const contact = await sock.getContact('5511999999999@s.whatsapp.net');
@@ -309,46 +315,46 @@ console.log(contact?.name);
 ```
 
 #### `profilePictureUrl(jid, type?): Promise<string | undefined>`
-Obtém URL da foto de perfil.
+Get profile picture URL.
 
 ```typescript
-// Thumbnail (mais rápido)
+// Thumbnail (faster)
 const thumbUrl = await sock.profilePictureUrl('5511999999999@s.whatsapp.net', 'preview');
 
-// Imagem completa
+// Full image
 const fullUrl = await sock.profilePictureUrl('5511999999999@s.whatsapp.net', 'image');
 ```
 
 #### `updateProfilePicture(jid, content): Promise<void>`
-Atualiza foto de perfil (própria ou de grupo se admin).
+Update profile picture (own or group if admin).
 
 ```typescript
 await sock.updateProfilePicture('5511999999999@s.whatsapp.net', {
-    url: 'https://exemplo.com/nova-foto.jpg'
+    url: 'https://example.com/new-photo.jpg'
 });
 ```
 
 #### `fetchStatus(jid): Promise<{ status: string; setAt: Date } | undefined>`
-Obtém o status/recado de um contato.
+Get a contact's status/about.
 
 ```typescript
 const status = await sock.fetchStatus('5511999999999@s.whatsapp.net');
-console.log(status?.status); // "Disponível"
+console.log(status?.status); // "Available"
 ```
 
 #### `updateBlockStatus(jid, action): Promise<void>`
-Bloqueia ou desbloqueia um contato.
+Block or unblock a contact.
 
 ```typescript
-// Bloquear
+// Block
 await sock.updateBlockStatus('5511999999999@s.whatsapp.net', 'block');
 
-// Desbloquear
+// Unblock
 await sock.updateBlockStatus('5511999999999@s.whatsapp.net', 'unblock');
 ```
 
 #### `getBusinessProfile(jid): Promise<unknown>`
-Obtém perfil comercial de conta business.
+Get business profile of a business account.
 
 ```typescript
 const profile = await sock.getBusinessProfile('5511999999999@s.whatsapp.net');
@@ -357,37 +363,37 @@ console.log(profile);
 
 ---
 
-### Presença
+### Presence
 
 #### `sendPresenceUpdate(type, jid?): Promise<void>`
-Atualiza status de presença.
+Update presence status.
 
 ```typescript
-// Online globalmente
+// Online globally
 await sock.sendPresenceUpdate('available');
 
 // Offline
 await sock.sendPresenceUpdate('unavailable');
 
-// Digitando em chat específico
+// Typing in specific chat
 await sock.sendPresenceUpdate('composing', '5511999999999@s.whatsapp.net');
 
-// Gravando áudio
+// Recording audio
 await sock.sendPresenceUpdate('recording', '5511999999999@s.whatsapp.net');
 
-// Parou de digitar
+// Stopped typing
 await sock.sendPresenceUpdate('paused', '5511999999999@s.whatsapp.net');
 ```
 
 #### `presenceSubscribe(jid): Promise<void>`
-Inscreve para receber atualizações de presença de um contato.
+Subscribe to receive presence updates from a contact.
 
 ```typescript
 await sock.presenceSubscribe('5511999999999@s.whatsapp.net');
 
-// Agora você receberá eventos presence.update para este contato
+// Now you'll receive presence.update events for this contact
 sock.ev.on('presence.update', (update) => {
-    console.log(`${update.id} está ${update.presences[update.id].lastKnownPresence}`);
+    console.log(`${update.id} is ${update.presences[update.id].lastKnownPresence}`);
 });
 ```
 
@@ -396,125 +402,125 @@ sock.ev.on('presence.update', (update) => {
 ### Chats
 
 #### `chatModify(modification, jid): Promise<void>`
-Modifica configurações de um chat.
+Modify chat settings.
 
 ```typescript
-// Arquivar
+// Archive
 await sock.chatModify({ archive: true }, '5511999999999@s.whatsapp.net');
 
-// Desarquivar
+// Unarchive
 await sock.chatModify({ archive: false }, '5511999999999@s.whatsapp.net');
 
-// Silenciar por 8 horas
+// Mute for 8 hours
 await sock.chatModify({ mute: 8 * 60 * 60 * 1000 }, '5511999999999@s.whatsapp.net');
 
-// Remover silenciamento
+// Unmute
 await sock.chatModify({ mute: null }, '5511999999999@s.whatsapp.net');
 
-// Fixar chat
+// Pin chat
 await sock.chatModify({ pin: true }, '5511999999999@s.whatsapp.net');
 
-// Desafixar
+// Unpin
 await sock.chatModify({ pin: false }, '5511999999999@s.whatsapp.net');
 ```
 
 ---
 
-### Grupos
+### Groups
 
 #### `groupFetchAllParticipating(): Promise<{ [jid: string]: GroupMetadata }>`
-Lista todos os grupos que você participa.
+List all groups you participate in.
 
 ```typescript
 const groups = await sock.groupFetchAllParticipating();
 
 Object.entries(groups).forEach(([jid, metadata]) => {
-    console.log(`${metadata.subject}: ${metadata.participants.length} membros`);
+    console.log(`${metadata.subject}: ${metadata.participants.length} members`);
 });
 ```
 
 #### `groupMetadata(jid): Promise<GroupMetadata>`
-Obtém metadados detalhados de um grupo.
+Get detailed group metadata.
 
 ```typescript
 const group = await sock.groupMetadata('123456789@g.us');
 console.log({
-    nome: group.subject,
-    descricao: group.desc,
-    criador: group.owner,
-    membros: group.participants.length
+    name: group.subject,
+    description: group.desc,
+    creator: group.owner,
+    members: group.participants.length
 });
 ```
 
 #### `groupCreate(subject, participants): Promise<GroupMetadata>`
-Cria um novo grupo.
+Create a new group.
 
 ```typescript
-const novoGrupo = await sock.groupCreate('Meu Novo Grupo', [
+const newGroup = await sock.groupCreate('My New Group', [
     '5511999999999@s.whatsapp.net',
     '5511888888888@s.whatsapp.net'
 ]);
 
-console.log(`Grupo criado: ${novoGrupo.id}`);
+console.log(`Group created: ${newGroup.id}`);
 ```
 
 #### `groupUpdateSubject(jid, subject): Promise<void>`
-Atualiza o nome do grupo.
+Update group name.
 
 ```typescript
-await sock.groupUpdateSubject('123456789@g.us', 'Novo Nome do Grupo');
+await sock.groupUpdateSubject('123456789@g.us', 'New Group Name');
 ```
 
 #### `groupUpdateDescription(jid, description): Promise<void>`
-Atualiza a descrição do grupo.
+Update group description.
 
 ```typescript
-await sock.groupUpdateDescription('123456789@g.us', 'Nova descrição do grupo');
+await sock.groupUpdateDescription('123456789@g.us', 'New group description');
 ```
 
 #### `groupSettingUpdate(jid, setting): Promise<void>`
-Atualiza configurações do grupo.
+Update group settings.
 
 ```typescript
-// Apenas admins podem enviar mensagens
+// Only admins can send messages
 await sock.groupSettingUpdate('123456789@g.us', 'announcement');
 
-// Todos podem enviar mensagens
+// Everyone can send messages
 await sock.groupSettingUpdate('123456789@g.us', 'not_announcement');
 
-// Apenas admins podem editar dados do grupo
+// Only admins can edit group info
 await sock.groupSettingUpdate('123456789@g.us', 'locked');
 
-// Todos podem editar dados do grupo
+// Everyone can edit group info
 await sock.groupSettingUpdate('123456789@g.us', 'unlocked');
 ```
 
 #### `groupParticipantsUpdate(jid, participants, action): Promise<{ status: string; jid: string }[]>`
-Gerencia participantes do grupo.
+Manage group participants.
 
 ```typescript
-// Adicionar membros
+// Add members
 await sock.groupParticipantsUpdate(
     '123456789@g.us',
     ['5511999999999@s.whatsapp.net'],
     'add'
 );
 
-// Remover membros
+// Remove members
 await sock.groupParticipantsUpdate(
     '123456789@g.us',
     ['5511999999999@s.whatsapp.net'],
     'remove'
 );
 
-// Promover a admin
+// Promote to admin
 await sock.groupParticipantsUpdate(
     '123456789@g.us',
     ['5511999999999@s.whatsapp.net'],
     'promote'
 );
 
-// Remover admin
+// Demote from admin
 await sock.groupParticipantsUpdate(
     '123456789@g.us',
     ['5511999999999@s.whatsapp.net'],
@@ -523,14 +529,14 @@ await sock.groupParticipantsUpdate(
 ```
 
 #### `groupLeave(jid): Promise<void>`
-Sai de um grupo.
+Leave a group.
 
 ```typescript
 await sock.groupLeave('123456789@g.us');
 ```
 
 #### `groupInviteCode(jid): Promise<string>`
-Obtém código de convite do grupo.
+Get group invite code.
 
 ```typescript
 const code = await sock.groupInviteCode('123456789@g.us');
@@ -538,43 +544,43 @@ console.log(`Link: https://chat.whatsapp.com/${code}`);
 ```
 
 #### `groupRevokeInvite(jid): Promise<string>`
-Revoga o código de convite e gera um novo.
+Revoke invite code and generate a new one.
 
 ```typescript
 const newCode = await sock.groupRevokeInvite('123456789@g.us');
-console.log(`Novo link: https://chat.whatsapp.com/${newCode}`);
+console.log(`New link: https://chat.whatsapp.com/${newCode}`);
 ```
 
 #### `groupAcceptInvite(code): Promise<string>`
-Entra em um grupo usando código de convite.
+Join a group using invite code.
 
 ```typescript
-// Pode passar o código ou URL completa
+// You can pass the code or full URL
 const groupJid = await sock.groupAcceptInvite('AbCdEfGhIjK');
-// ou
+// or
 const groupJid = await sock.groupAcceptInvite('https://chat.whatsapp.com/AbCdEfGhIjK');
 ```
 
 ---
 
-## Eventos
+## Events
 
-O SDK emite eventos compatíveis com Baileys através do `sock.ev`.
+The SDK emits Baileys-compatible events through `sock.ev`.
 
 ### connection.update
-Atualização de status da conexão.
+Connection status update.
 
 ```typescript
 sock.ev.on('connection.update', (update) => {
     const { connection, qrCode, lastDisconnect } = update;
 
     if (qrCode) {
-        // Exibir QR Code para escanear
+        // Display QR Code to scan
         console.log('QR:', qrCode);
     }
 
     if (connection === 'open') {
-        console.log('Conectado!');
+        console.log('Connected!');
     }
 
     if (connection === 'close') {
@@ -587,71 +593,71 @@ sock.ev.on('connection.update', (update) => {
 ```
 
 ### messages.upsert
-Novas mensagens recebidas.
+New messages received.
 
 ```typescript
 sock.ev.on('messages.upsert', ({ messages, type }) => {
     for (const msg of messages) {
-        if (msg.key.fromMe) continue; // Ignorar mensagens próprias
+        if (msg.key.fromMe) continue; // Ignore own messages
 
-        console.log('Nova mensagem:', msg.message?.conversation);
+        console.log('New message:', msg.message?.conversation);
 
-        // Responder
+        // Reply
         await sock.sendMessage(msg.key.remoteJid, {
-            text: 'Mensagem recebida!'
+            text: 'Message received!'
         });
     }
 });
 ```
 
 ### messages.update
-Atualizações de status de mensagens.
+Message status updates.
 
 ```typescript
 sock.ev.on('messages.update', (updates) => {
     for (const update of updates) {
-        console.log(`Mensagem ${update.key.id}: status ${update.update.status}`);
+        console.log(`Message ${update.key.id}: status ${update.update.status}`);
     }
 });
 ```
 
 ### presence.update
-Atualizações de presença.
+Presence updates.
 
 ```typescript
 sock.ev.on('presence.update', (update) => {
     const presence = update.presences[update.id];
-    console.log(`${update.id} está ${presence.lastKnownPresence}`);
+    console.log(`${update.id} is ${presence.lastKnownPresence}`);
 });
 ```
 
 ### groups.update
-Atualizações de grupos.
+Group updates.
 
 ```typescript
 sock.ev.on('groups.update', (updates) => {
     for (const update of updates) {
-        console.log(`Grupo ${update.id} atualizado:`, update);
+        console.log(`Group ${update.id} updated:`, update);
     }
 });
 ```
 
 ### group-participants.update
-Alterações em participantes de grupos.
+Group participant changes.
 
 ```typescript
 sock.ev.on('group-participants.update', (update) => {
-    console.log(`${update.action} em ${update.id}:`, update.participants);
+    console.log(`${update.action} in ${update.id}:`, update.participants);
 });
 ```
 
 ---
 
-## Recebendo Webhooks
+## Receiving Webhooks
 
-O VEX Server envia eventos via webhook para a URL configurada. Seu servidor deve receber esses eventos e injetá-los no SDK.
+VEX Server sends events via webhook to the configured URL. Your server should receive these events and inject them into the SDK.
 
-### Exemplo com Express
+### Express Example
 
 ```typescript
 import express from 'express';
@@ -661,21 +667,21 @@ const app = express();
 app.use(express.json());
 
 const sock = makeWASocket({
-    url: 'http://vex-server:5342',
-    apiKey: 'minha-api-key',
-    webhookUrl: 'http://meu-servidor:3000/webhook'
+    url: 'https://your-vex-server.com',
+    apiKey: 'my-api-key',
+    webhookUrl: 'https://my-server.com/webhook'
 });
 
-// Endpoint para receber webhooks do VEX
+// Endpoint to receive VEX webhooks
 app.post('/webhook', (req, res) => {
     const { event, data, sessionUUID, secret } = req.body;
 
-    // Validar secret (opcional mas recomendado)
-    if (secret !== 'minha-api-key') {
+    // Validate secret (optional but recommended)
+    if (secret !== 'my-api-key') {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // Injetar evento no SDK
+    // Inject event into SDK
     sock.injectEvent(event, data);
 
     res.json({ received: true });
@@ -686,19 +692,19 @@ app.listen(3000);
 
 ---
 
-## Tratamento de Erros
+## Error Handling
 
-O SDK lança `VexApiError` para erros de API.
+The SDK throws `VexApiError` for API errors.
 
 ```typescript
 import { VexApiError } from '@vex/client-sdk';
 
 try {
-    await sock.sendMessage('numero-invalido', { text: 'Teste' });
+    await sock.sendMessage('invalid-number', { text: 'Test' });
 } catch (error) {
     if (error instanceof VexApiError) {
-        console.error(`Erro ${error.statusCode}: ${error.message}`);
-        console.error('Resposta:', error.response);
+        console.error(`Error ${error.statusCode}: ${error.message}`);
+        console.error('Response:', error.response);
     } else {
         throw error;
     }
@@ -707,7 +713,7 @@ try {
 
 ---
 
-## Tipos Exportados
+## Exported Types
 
 ```typescript
 import {
@@ -731,16 +737,26 @@ import {
 
 ## Playground
 
-Execute o playground visual para testar a conexão:
+Run the visual playground to test the connection:
 
 ```bash
 npm run playground
 ```
 
-Acesse `http://localhost:8080/playground.html` no navegador.
+Access `http://localhost:8080/playground.html` in your browser.
 
 ---
 
-## Licença
+## Server Access
+
+This SDK connects to a VEX Server instance running Baileys. The server is a private service.
+
+**To get access to the VEX Server, please contact:**
+
+📧 **andytargino@outlook.com**
+
+---
+
+## License
 
 MIT
