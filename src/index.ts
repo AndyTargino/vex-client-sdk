@@ -13,6 +13,12 @@ import { WebhookParser } from "./lib/WebhookParser";
 export type WABotEvents = BaileysEventMap;
 
 /**
+ * Endpoint padrão para receber webhooks do VEX Server
+ * IMPORTANTE: Sua aplicação DEVE expor este endpoint para receber eventos
+ */
+export const VEX_WEBHOOK_PATH = '/api/v1/vex/webhooks';
+
+/**
  * Configuração do cliente VEX
  */
 export interface VexClientConfig {
@@ -22,10 +28,12 @@ export interface VexClientConfig {
     token?: string;
     /** Chave de Segurança da API (API_SECRET_KEY) */
     apiKey: string;
-    /** URL para onde o VEX vai mandar eventos de webhook */
-    webhookUrl: string;
-    /** Secret para autenticação do webhook (opcional, default: apiKey) */
-    webhookSecret?: string;
+    /**
+     * URL base da sua aplicação para receber webhooks
+     * O SDK automaticamente adiciona /api/v1/vex/webhooks
+     * Exemplo: 'https://sua-app.com' -> 'https://sua-app.com/api/v1/vex/webhooks'
+     */
+    backendUrl: string;
     /** Metadados customizados para a sessão */
     metadata?: Record<string, unknown>;
     /** Configuração de retry para requisições HTTP */
@@ -122,7 +130,7 @@ interface SendMessageResponse {
  * const sock = makeWASocket({
  *     url: 'http://localhost:5342',
  *     apiKey: 'your-api-key',
- *     webhookUrl: 'http://your-server.com/webhook'
+ *     backendUrl: 'http://your-server.com'  // webhooks em /api/v1/vex/webhooks
  * });
  *
  * sock.ev.on('connection.update', (update) => {
@@ -220,14 +228,24 @@ export class VexClient {
     }
 
     /**
+     * Constrói a URL completa do webhook
+     * IMPORTANTE: O endpoint DEVE ser /api/v1/vex/webhooks para compatibilidade
+     */
+    private buildWebhookUrl(): string {
+        const baseUrl = this.config.backendUrl.replace(/\/+$/, ''); // Remove trailing slashes
+        return `${baseUrl}${VEX_WEBHOOK_PATH}`;
+    }
+
+    /**
      * Lógica de inicialização: Se tem token, conecta. Se não, cria nova sessão.
      */
     private async initialize(): Promise<void> {
         try {
+            const webhookUrl = this.buildWebhookUrl();
+
             const response = await this.http.post<InitSessionResponse>("/sessions/init", {
                 sessionUUID: this.config.token,
-                webhookUrl: this.config.webhookUrl,
-                webhookSecret: this.config.webhookSecret ?? this.config.apiKey,
+                webhookUrl,
                 metadata: this.config.metadata
             });
 
@@ -766,7 +784,7 @@ export class VexClient {
  * const sock = makeWASocket({
  *     url: 'http://localhost:5342',
  *     apiKey: 'your-api-key',
- *     webhookUrl: 'http://your-server.com/webhook'
+ *     backendUrl: 'http://your-server.com'  // webhooks em /api/v1/vex/webhooks
  * });
  * ```
  */

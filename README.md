@@ -17,13 +17,13 @@ npm install github:AndyTargino/vex-client-sdk#v1.1.0
 ## Quick Start
 
 ```typescript
-import { makeWASocket } from '@vex/client-sdk';
+import { makeWASocket, VEX_WEBHOOK_PATH } from '@vex/client-sdk';
 
 // Create VEX client
 const sock = makeWASocket({
     url: 'https://your-vex-server.com',
     apiKey: 'your-api-key',
-    webhookUrl: 'https://your-app.com/webhook'
+    backendUrl: 'https://your-app.com'  // Webhooks will be sent to /api/v1/vex/webhooks
 });
 
 // Wait for initialization
@@ -53,12 +53,13 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
 |----------|------|----------|-------------|
 | `url` | `string` | Yes | VEX Microservice URL |
 | `apiKey` | `string` | Yes | API Key (API_SECRET_KEY) |
-| `webhookUrl` | `string` | Yes | URL to receive webhook events |
+| `backendUrl` | `string` | Yes | Your backend base URL (webhooks sent to `/api/v1/vex/webhooks`) |
 | `token` | `string` | No | Existing session UUID (for reconnection) |
-| `webhookSecret` | `string` | No | Secret for webhook validation |
 | `metadata` | `object` | No | Custom session metadata |
 | `retry.maxRetries` | `number` | No | Max retry attempts (default: 5) |
 | `retry.baseDelay` | `number` | No | Base delay in ms (default: 1000) |
+
+> **IMPORTANT:** The SDK automatically appends `/api/v1/vex/webhooks` to your `backendUrl`. Your backend MUST expose this endpoint to receive VEX events.
 
 ### Full Configuration Example
 
@@ -66,8 +67,7 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
 const sock = makeWASocket({
     url: 'https://your-vex-server.com',
     apiKey: process.env.VEX_API_KEY,
-    webhookUrl: 'https://my-app.com/webhook',
-    webhookSecret: 'my-secure-secret',
+    backendUrl: 'https://my-app.com',  // Webhooks at: https://my-app.com/api/v1/vex/webhooks
     token: 'existing-session-uuid', // optional
     metadata: {
         company: 'My Company',
@@ -655,13 +655,13 @@ sock.ev.on('group-participants.update', (update) => {
 
 ## Receiving Webhooks
 
-VEX Server sends events via webhook to the configured URL. Your server should receive these events and inject them into the SDK.
+VEX Server sends events via webhook to your backend. Your server **MUST** expose the endpoint `/api/v1/vex/webhooks` to receive these events.
 
 ### Express Example
 
 ```typescript
 import express from 'express';
-import { makeWASocket, WebhookParser } from '@vex/client-sdk';
+import { makeWASocket, VEX_WEBHOOK_PATH } from '@vex/client-sdk';
 
 const app = express();
 app.use(express.json());
@@ -669,17 +669,12 @@ app.use(express.json());
 const sock = makeWASocket({
     url: 'https://your-vex-server.com',
     apiKey: 'my-api-key',
-    webhookUrl: 'https://my-server.com/webhook'
+    backendUrl: 'https://my-server.com'  // Webhooks at /api/v1/vex/webhooks
 });
 
-// Endpoint to receive VEX webhooks
-app.post('/webhook', (req, res) => {
-    const { event, data, sessionUUID, secret } = req.body;
-
-    // Validate secret (optional but recommended)
-    if (secret !== 'my-api-key') {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
+// IMPORTANT: This endpoint path MUST match VEX_WEBHOOK_PATH (/api/v1/vex/webhooks)
+app.post(VEX_WEBHOOK_PATH, (req, res) => {
+    const { event, data, sessionUUID } = req.body;
 
     // Inject event into SDK
     sock.injectEvent(event, data);
@@ -689,6 +684,8 @@ app.post('/webhook', (req, res) => {
 
 app.listen(3000);
 ```
+
+> **WARNING:** If you use a different webhook path, VEX Server will not be able to deliver events to your application. Always use `/api/v1/vex/webhooks`.
 
 ---
 

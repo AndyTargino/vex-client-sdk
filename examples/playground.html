@@ -707,8 +707,7 @@
                 const result = await apiRequest('/sessions', {
                     method: 'POST',
                     body: JSON.stringify({
-                        webhookUrl: 'http://localhost:3000/webhook',
-                        webhookSecret: 'playground-secret'
+                        webhookUrl: 'http://localhost:3000/api/v1/vex/webhooks'
                     })
                 });
 
