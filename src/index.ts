@@ -43,6 +43,21 @@ export interface VexClientConfig {
         /** Delay base em ms (default: 1000) */
         baseDelay?: number;
     };
+    /** Configuração de reconexão automática */
+    reconnection?: {
+        /** Habilita reconexão automática (default: true) */
+        enabled?: boolean;
+        /** Intervalo inicial de reconexão em ms (default: 1000) */
+        initialDelay?: number;
+        /** Intervalo máximo de reconexão em ms (default: 30000) */
+        maxDelay?: number;
+        /** Multiplicador do backoff exponencial (default: 2) */
+        multiplier?: number;
+        /** Número máximo de tentativas (default: Infinity) */
+        maxAttempts?: number;
+    };
+    /** Intervalo do health check em ms (default: 30000, 0 para desabilitar) */
+    healthCheckInterval?: number;
 }
 
 /**
@@ -168,17 +183,27 @@ export class VexClient {
     private config: VexClientConfig;
     private initPromise: Promise<void>;
 
+    // Reconexão
+    private _isServerOnline: boolean = true;
+    private _reconnectAttempts: number = 0;
+    private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private _healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+    private _isReconnecting: boolean = false;
+    private _isDestroyed: boolean = false;
+
     constructor(config: VexClientConfig) {
         this.config = config;
         this.ev = new EventEmitter();
         this._sessionId = config.token;
 
-        // HttpClient com configuração de retry
+        // HttpClient com configuração de retry e callbacks de status
         const httpConfig: HttpClientConfig = {
             baseURL: config.url,
             apiKey: config.apiKey,
             maxRetries: config.retry?.maxRetries ?? 5,
-            baseDelay: config.retry?.baseDelay ?? 1000
+            baseDelay: config.retry?.baseDelay ?? 1000,
+            onServerOffline: () => this.handleServerOffline(),
+            onServerOnline: () => this.handleServerOnline()
         };
         this.http = new HttpClient(httpConfig);
 
@@ -186,7 +211,7 @@ export class VexClient {
         this.ws = {
             on: () => { },
             off: () => { },
-            close: () => { }
+            close: () => this.destroy()
         };
 
         // Define user provisório se token existir
@@ -203,7 +228,33 @@ export class VexClient {
                 connection: "close",
                 lastDisconnect: { error: err, date: new Date() }
             });
+
+            // Inicia reconexão automática se habilitada
+            if (this.isReconnectionEnabled()) {
+                this.scheduleReconnect();
+            }
         });
+    }
+
+    /**
+     * Verifica se o servidor VEX está online
+     */
+    public get isServerOnline(): boolean {
+        return this._isServerOnline;
+    }
+
+    /**
+     * Retorna o número de tentativas de reconexão
+     */
+    public get reconnectAttempts(): number {
+        return this._reconnectAttempts;
+    }
+
+    /**
+     * Verifica se está tentando reconectar
+     */
+    public get isReconnecting(): boolean {
+        return this._isReconnecting;
     }
 
     /**
@@ -256,6 +307,11 @@ export class VexClient {
                 name: response.phoneNumber
             };
 
+            // Reset do contador de reconexão após sucesso
+            this._reconnectAttempts = 0;
+            this._isReconnecting = false;
+            this._isServerOnline = true;
+
             if (response.isConnected) {
                 this._connectionStatus = 'open';
                 this.ev.emit("connection.update", { connection: "open" });
@@ -267,6 +323,9 @@ export class VexClient {
                 this.ev.emit("connection.update", { connection: "connecting" });
             }
 
+            // Inicia health check se configurado
+            this.startHealthCheck();
+
         } catch (error) {
             console.error("[VexSDK] Failed to initialize session:", error);
             throw error;
@@ -274,15 +333,254 @@ export class VexClient {
     }
 
     /**
+     * Verifica se a reconexão automática está habilitada
+     */
+    private isReconnectionEnabled(): boolean {
+        return this.config.reconnection?.enabled !== false;
+    }
+
+    /**
+     * Calcula o delay para a próxima tentativa de reconexão (exponential backoff)
+     */
+    private getReconnectDelay(): number {
+        const initialDelay = this.config.reconnection?.initialDelay ?? 1000;
+        const maxDelay = this.config.reconnection?.maxDelay ?? 30000;
+        const multiplier = this.config.reconnection?.multiplier ?? 2;
+
+        const delay = Math.min(
+            initialDelay * Math.pow(multiplier, this._reconnectAttempts),
+            maxDelay
+        );
+
+        // Adiciona jitter de até 10% para evitar thundering herd
+        const jitter = delay * 0.1 * Math.random();
+        return Math.floor(delay + jitter);
+    }
+
+    /**
+     * Verifica se pode continuar tentando reconectar
+     */
+    private canReconnect(): boolean {
+        if (this._isDestroyed) return false;
+
+        const maxAttempts = this.config.reconnection?.maxAttempts ?? Infinity;
+        return this._reconnectAttempts < maxAttempts;
+    }
+
+    /**
+     * Agenda uma tentativa de reconexão
+     */
+    private scheduleReconnect(): void {
+        if (!this.isReconnectionEnabled() || !this.canReconnect() || this._isDestroyed) {
+            return;
+        }
+
+        // Limpa timer existente
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+        }
+
+        const delay = this.getReconnectDelay();
+        this._isReconnecting = true;
+
+        console.log(`[VexSDK] Scheduling reconnect attempt ${this._reconnectAttempts + 1} in ${delay}ms`);
+
+        this._reconnectTimer = setTimeout(() => {
+            this.attemptReconnect();
+        }, delay);
+    }
+
+    /**
+     * Tenta reconectar ao servidor
+     */
+    private async attemptReconnect(): Promise<void> {
+        if (this._isDestroyed) return;
+
+        this._reconnectAttempts++;
+        console.log(`[VexSDK] Reconnect attempt ${this._reconnectAttempts}`);
+
+        // Emite evento de reconexão
+        this.ev.emit("connection.update", {
+            connection: "connecting",
+            isReconnecting: true,
+            reconnectAttempt: this._reconnectAttempts
+        });
+
+        try {
+            // Primeiro faz health check
+            const isHealthy = await this.http.healthCheck();
+
+            if (!isHealthy) {
+                throw new Error('Server health check failed');
+            }
+
+            // Tenta inicializar novamente
+            await this.initialize();
+
+            console.log('[VexSDK] Reconnected successfully');
+
+        } catch (error) {
+            console.error(`[VexSDK] Reconnect attempt ${this._reconnectAttempts} failed:`, error);
+
+            // Agenda próxima tentativa
+            if (this.canReconnect()) {
+                this.scheduleReconnect();
+            } else {
+                console.error('[VexSDK] Max reconnect attempts reached, giving up');
+                this._isReconnecting = false;
+                this.ev.emit("connection.update", {
+                    connection: "close",
+                    lastDisconnect: {
+                        error: new Error('Max reconnect attempts reached'),
+                        date: new Date()
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * Handler quando o servidor fica offline
+     */
+    private handleServerOffline(): void {
+        if (this._isDestroyed) return;
+
+        this._isServerOnline = false;
+        console.warn('[VexSDK] Server went offline');
+
+        // Emite evento de desconexão
+        this.ev.emit("connection.update", {
+            connection: "close",
+            lastDisconnect: {
+                error: new Error('Server offline'),
+                date: new Date()
+            }
+        });
+
+        // Inicia reconexão automática
+        if (this.isReconnectionEnabled() && !this._isReconnecting) {
+            this.scheduleReconnect();
+        }
+    }
+
+    /**
+     * Handler quando o servidor volta online
+     */
+    private handleServerOnline(): void {
+        if (this._isDestroyed) return;
+
+        const wasOffline = !this._isServerOnline;
+        this._isServerOnline = true;
+
+        if (wasOffline) {
+            console.log('[VexSDK] Server is back online');
+        }
+    }
+
+    /**
+     * Inicia o health check periódico
+     */
+    private startHealthCheck(): void {
+        const interval = this.config.healthCheckInterval ?? 30000;
+
+        if (interval <= 0 || this._isDestroyed) return;
+
+        // Limpa timer existente
+        this.stopHealthCheck();
+
+        this._healthCheckTimer = setInterval(async () => {
+            if (this._isDestroyed) {
+                this.stopHealthCheck();
+                return;
+            }
+
+            try {
+                const isHealthy = await this.http.healthCheck();
+
+                if (!isHealthy && this._isServerOnline) {
+                    this.handleServerOffline();
+                }
+            } catch {
+                // Erro já é tratado pelo HttpClient
+            }
+        }, interval);
+    }
+
+    /**
+     * Para o health check periódico
+     */
+    private stopHealthCheck(): void {
+        if (this._healthCheckTimer) {
+            clearInterval(this._healthCheckTimer);
+            this._healthCheckTimer = null;
+        }
+    }
+
+    /**
+     * Força uma tentativa de reconexão imediata
+     */
+    public async forceReconnect(): Promise<void> {
+        if (this._isDestroyed) {
+            throw new Error("VexClient has been destroyed");
+        }
+
+        // Cancela timers existentes
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+
+        this._reconnectAttempts = 0;
+        await this.attemptReconnect();
+    }
+
+    /**
+     * Destrói o cliente e limpa todos os recursos
+     */
+    public destroy(): void {
+        this._isDestroyed = true;
+
+        // Limpa timers
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+
+        this.stopHealthCheck();
+
+        // Emite evento de fechamento
+        this._connectionStatus = 'close';
+        this.ev.emit("connection.update", {
+            connection: "close",
+            lastDisconnect: {
+                error: new Error('Client destroyed'),
+                date: new Date()
+            }
+        });
+
+        // Remove todos os listeners
+        this.ev.removeAllListeners();
+
+        console.log('[VexSDK] Client destroyed');
+    }
+
+    /**
      * Reconecta a sessão existente
      */
     public async reconnect(): Promise<void> {
+        if (this._isDestroyed) {
+            throw new Error("VexClient has been destroyed. Create a new instance.");
+        }
+
         if (!this._sessionId) {
             throw new Error("No session to reconnect. Use a new VexClient instead.");
         }
 
         this._connectionStatus = 'connecting';
         this.ev.emit("connection.update", { connection: "connecting" });
+
+        // Reset contadores
+        this._reconnectAttempts = 0;
 
         await this.initialize();
     }
@@ -292,6 +590,14 @@ export class VexClient {
      */
     public async logout(): Promise<void> {
         this.ensureInitialized();
+
+        // Para reconexão automática
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+        this.stopHealthCheck();
+        this._isReconnecting = false;
 
         await this.http.delete(`/sessions/${this._sessionId}`);
 
@@ -765,9 +1071,12 @@ export class VexClient {
     }
 
     /**
-     * Verifica se o cliente está inicializado
+     * Verifica se o cliente está inicializado e ativo
      */
     private ensureInitialized(): void {
+        if (this._isDestroyed) {
+            throw new Error("VexClient has been destroyed. Create a new instance.");
+        }
         if (!this._sessionId) {
             throw new Error("VexClient not yet initialized. Wait for connection or use waitForInit().");
         }

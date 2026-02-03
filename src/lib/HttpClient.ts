@@ -15,6 +15,10 @@ export interface HttpClientConfig {
     baseDelay?: number;
     /** Timeout das requisições em ms (default: 30000) */
     timeout?: number;
+    /** Callback quando servidor fica offline */
+    onServerOffline?: () => void;
+    /** Callback quando servidor volta online */
+    onServerOnline?: () => void;
 }
 
 /**
@@ -38,6 +42,8 @@ export class VexApiError extends Error {
 export class HttpClient {
     private client: AxiosInstance;
     private config: HttpClientConfig;
+    private _isServerOnline: boolean = true;
+    private lastError: Error | null = null;
 
     constructor(config: HttpClientConfig) {
         this.config = {
@@ -61,6 +67,20 @@ export class HttpClient {
     }
 
     /**
+     * Verifica se o servidor está online
+     */
+    public get isServerOnline(): boolean {
+        return this._isServerOnline;
+    }
+
+    /**
+     * Retorna o último erro ocorrido
+     */
+    public getLastError(): Error | null {
+        return this.lastError;
+    }
+
+    /**
      * Configura retry automático
      */
     private setupRetry(): void {
@@ -71,8 +91,11 @@ export class HttpClient {
                 return Math.min(this.config.baseDelay! * Math.pow(2, retryCount - 1), 16000);
             },
             retryCondition: (error: AxiosError) => {
-                // Não tentar novamente se for erro de conexão recusada (servidor down)
-                if (error.code === 'ECONNREFUSED') return false;
+                // Detecta servidor offline
+                if (this.isConnectionError(error)) {
+                    this.markServerOffline(error);
+                    return true; // Tentar novamente em erros de conexão
+                }
 
                 // Não tentar novamente em erros de autenticação/autorização
                 if (error.response?.status === 401 || error.response?.status === 403) return false;
@@ -91,13 +114,57 @@ export class HttpClient {
     }
 
     /**
+     * Verifica se é erro de conexão (servidor down)
+     */
+    private isConnectionError(error: AxiosError): boolean {
+        const connectionErrors = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH'];
+        return connectionErrors.includes(error.code || '') || error.message.includes('Network Error');
+    }
+
+    /**
+     * Marca o servidor como offline
+     */
+    private markServerOffline(error: Error): void {
+        if (this._isServerOnline) {
+            this._isServerOnline = false;
+            this.lastError = error;
+            console.error('[VexSDK] Server went offline:', error.message);
+            this.config.onServerOffline?.();
+        }
+    }
+
+    /**
+     * Marca o servidor como online
+     */
+    private markServerOnline(): void {
+        if (!this._isServerOnline) {
+            this._isServerOnline = true;
+            this.lastError = null;
+            console.log('[VexSDK] Server is back online');
+            this.config.onServerOnline?.();
+        }
+    }
+
+    /**
      * Configura interceptors para tratamento de erros
      */
     private setupInterceptors(): void {
         this.client.interceptors.response.use(
-            (response) => response,
+            (response) => {
+                // Servidor respondeu com sucesso - marca como online
+                this.markServerOnline();
+                return response;
+            },
             (error: AxiosError) => {
+                // Detecta erro de conexão
+                if (this.isConnectionError(error)) {
+                    this.markServerOffline(error);
+                }
+
                 if (error.response) {
+                    // Servidor respondeu (mesmo com erro) - está online
+                    this.markServerOnline();
+
                     const message = (error.response.data as { message?: string })?.message
                         || error.message
                         || 'Unknown error';
@@ -167,5 +234,19 @@ export class HttpClient {
      */
     public getBaseURL(): string {
         return this.config.baseURL;
+    }
+
+    /**
+     * Verifica se o servidor está acessível (health check)
+     * @returns true se o servidor está online
+     */
+    public async healthCheck(): Promise<boolean> {
+        try {
+            await this.client.get('/health', { timeout: 5000 });
+            this.markServerOnline();
+            return true;
+        } catch {
+            return false;
+        }
     }
 }
