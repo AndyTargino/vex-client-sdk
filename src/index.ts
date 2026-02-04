@@ -20,6 +20,77 @@ export type WABotEvents = BaileysEventMap;
 export const VEX_WEBHOOK_PATH = '/api/v1/vex/webhooks';
 
 /**
+ * =====================================================
+ * SINGLETON REGISTRY - Evita múltiplas instâncias por sessão
+ * =====================================================
+ *
+ * O problema: Aplicações frequentemente criam múltiplas instâncias
+ * do VexClient para a mesma sessão, causando:
+ * - Múltiplas conexões Socket.IO desnecessárias
+ * - Loops de reconexão (cada instância tenta reconectar)
+ * - Eventos duplicados
+ * - Erros 429 (rate limiting)
+ *
+ * A solução: Registry Singleton que garante apenas UMA instância
+ * por sessionUUID. Se a instância já existe, retorna ela.
+ */
+const instanceRegistry = new Map<string, VexClient>();
+const pendingInitializations = new Map<string, Promise<VexClient>>();
+
+/**
+ * Obtém uma instância existente pelo sessionId
+ * @param sessionId UUID da sessão
+ * @returns VexClient ou undefined se não existir
+ */
+export const getInstance = (sessionId: string): VexClient | undefined => {
+    return instanceRegistry.get(sessionId);
+};
+
+/**
+ * Verifica se uma instância existe
+ * @param sessionId UUID da sessão
+ */
+export const hasInstance = (sessionId: string): boolean => {
+    return instanceRegistry.has(sessionId);
+};
+
+/**
+ * Destrói uma instância específica e a remove do registry
+ * @param sessionId UUID da sessão
+ */
+export const destroyInstance = (sessionId: string): void => {
+    const instance = instanceRegistry.get(sessionId);
+    if (instance) {
+        instance.destroy();
+        instanceRegistry.delete(sessionId);
+        console.log(`[VexSDK Registry] Instance ${sessionId} destroyed and removed`);
+    }
+};
+
+/**
+ * Lista todas as sessões ativas
+ */
+export const listActiveSessions = (): string[] => {
+    return Array.from(instanceRegistry.keys());
+};
+
+/**
+ * Destrói todas as instâncias (cleanup completo)
+ */
+export const destroyAllInstances = (): void => {
+    for (const [sessionId, instance] of instanceRegistry) {
+        try {
+            instance.destroy();
+        } catch (e) {
+            console.error(`[VexSDK Registry] Error destroying ${sessionId}:`, e);
+        }
+    }
+    instanceRegistry.clear();
+    pendingInitializations.clear();
+    console.log('[VexSDK Registry] All instances destroyed');
+};
+
+/**
  * Configuração do cliente VEX
  */
 export interface VexClientConfig {
@@ -229,6 +300,8 @@ export class VexClient {
     private _healthCheckTimer: ReturnType<typeof setInterval> | null = null;
     private _isReconnecting: boolean = false;
     private _isDestroyed: boolean = false;
+    private _lastReconnectTime: number = 0; // Para debouncing
+    private _rateLimitedUntil: number = 0;  // Para rate limiting (erro 429)
 
     // Polling interno (fallback quando Socket.IO falha)
     private _pollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -246,6 +319,12 @@ export class VexClient {
         this.config = config;
         this.ev = new EventEmitter();
         this._sessionId = config.token;
+
+        // SINGLETON: Se já existe instância para este token, isso é um erro de uso
+        // A aplicação deveria usar getInstance() ou makeWASocket() que já faz a verificação
+        if (this._sessionId && instanceRegistry.has(this._sessionId)) {
+            console.warn(`[VexSDK] WARNING: Instance for ${this._sessionId} already exists! Use getInstance() instead.`);
+        }
 
         // HttpClient com configuração de retry e callbacks de status
         const httpConfig: HttpClientConfig = {
@@ -366,6 +445,11 @@ export class VexClient {
                 id: this.id,
                 name: response.phoneNumber
             };
+
+            // SINGLETON: Registra no registry após obter sessionId
+            // Se já existe uma instância, ela será sobrescrita (warn já foi emitido no constructor)
+            instanceRegistry.set(this._sessionId, this);
+            console.log(`[VexSDK Registry] Instance registered: ${this._sessionId}`);
 
             // Salva estado inicial para comparação no polling
             this._lastQrCode = response.qrCode || null;
@@ -596,34 +680,57 @@ export class VexClient {
 
     /**
      * Agenda uma tentativa de reconexão
+     * Implementa debouncing para evitar múltiplas reconexões simultâneas
      */
     private scheduleReconnect(): void {
         if (!this.isReconnectionEnabled() || !this.canReconnect() || this._isDestroyed) {
             return;
         }
 
-        // Limpa timer existente
+        // DEBOUNCING: Se já tem reconexão agendada, não agenda outra
         if (this._reconnectTimer) {
-            clearTimeout(this._reconnectTimer);
+            console.log('[VexSDK] Reconnect already scheduled, skipping duplicate');
+            return;
         }
 
-        const delay = this.getReconnectDelay();
+        // RATE LIMITING: Se ainda está em período de rate limit, usa delay maior
+        const now = Date.now();
+        let delay = this.getReconnectDelay();
+
+        if (this._rateLimitedUntil > now) {
+            const rateLimitRemaining = this._rateLimitedUntil - now;
+            delay = Math.max(delay, rateLimitRemaining + 5000); // Adiciona 5s de margem
+            console.log(`[VexSDK] Rate limited, waiting ${Math.round(delay / 1000)}s before reconnect`);
+        }
+
+        // DEBOUNCING: Evita reconexões muito frequentes (mínimo 2s entre tentativas)
+        const timeSinceLastReconnect = now - this._lastReconnectTime;
+        const MIN_RECONNECT_INTERVAL = 2000;
+        if (timeSinceLastReconnect < MIN_RECONNECT_INTERVAL) {
+            delay = Math.max(delay, MIN_RECONNECT_INTERVAL - timeSinceLastReconnect);
+        }
+
         this._isReconnecting = true;
 
         console.log(`[VexSDK] Scheduling reconnect attempt ${this._reconnectAttempts + 1} in ${delay}ms`);
 
         this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null; // Limpa referência antes de tentar
             this.attemptReconnect();
         }, delay);
     }
 
     /**
      * Tenta reconectar ao servidor
+     * Inclui tratamento especial para erro 429 (rate limiting)
      */
     private async attemptReconnect(): Promise<void> {
         if (this._isDestroyed) return;
 
+        // DEBOUNCING: Atualiza timestamp da última reconexão
+        this._lastReconnectTime = Date.now();
         this._reconnectAttempts++;
+
         console.log(`[VexSDK] Reconnect attempt ${this._reconnectAttempts}`);
 
         // Emite evento de reconexão
@@ -644,10 +751,23 @@ export class VexClient {
             // Tenta inicializar novamente
             await this.initialize();
 
+            // Sucesso! Limpa rate limiting
+            this._rateLimitedUntil = 0;
             console.log('[VexSDK] Reconnected successfully');
 
-        } catch (error) {
-            console.error(`[VexSDK] Reconnect attempt ${this._reconnectAttempts} failed:`, error);
+        } catch (error: any) {
+            // TRATAMENTO ESPECIAL PARA ERRO 429 (Rate Limited)
+            if (error?.statusCode === 429 || error?.message?.includes('429') || error?.message?.includes('Too many')) {
+                // Extrai tempo de espera do erro ou usa 60s como padrão
+                const retryAfter = error?.retryAfter || 60;
+                this._rateLimitedUntil = Date.now() + (retryAfter * 1000);
+                console.warn(`[VexSDK] Rate limited (429). Waiting ${retryAfter}s before next attempt.`);
+
+                // Aumenta contador significativamente para evitar mais tentativas rápidas
+                this._reconnectAttempts = Math.max(this._reconnectAttempts, 5);
+            }
+
+            console.error(`[VexSDK] Reconnect attempt ${this._reconnectAttempts} failed:`, error?.message || error);
 
             // Agenda próxima tentativa
             if (this.canReconnect()) {
@@ -887,7 +1007,18 @@ export class VexClient {
      * Destrói o cliente e limpa todos os recursos
      */
     public destroy(): void {
+        if (this._isDestroyed) {
+            console.log('[VexSDK] Client already destroyed, skipping');
+            return;
+        }
+
         this._isDestroyed = true;
+
+        // SINGLETON: Remove do registry
+        if (this._sessionId && instanceRegistry.get(this._sessionId) === this) {
+            instanceRegistry.delete(this._sessionId);
+            console.log(`[VexSDK Registry] Instance removed: ${this._sessionId}`);
+        }
 
         // Limpa timers
         if (this._reconnectTimer) {
@@ -1632,18 +1763,45 @@ export class VexClient {
 /**
  * Factory function compatível com Baileys
  *
+ * IMPORTANTE: Esta função implementa o padrão SINGLETON por sessão.
+ * Se você chamar makeWASocket() duas vezes com o mesmo token,
+ * receberá a MESMA instância (evita múltiplas conexões Socket.IO).
+ *
  * @example
  * ```typescript
- * import { makeWASocket } from '@vex/client-sdk';
+ * import { makeWASocket, getInstance } from '@vex/client-sdk';
  *
- * const sock = makeWASocket({
+ * // Primeira chamada - cria nova instância
+ * const sock1 = makeWASocket({
  *     url: 'http://localhost:5342',
  *     apiKey: 'your-api-key',
- *     backendUrl: 'http://your-server.com'  // webhooks em /api/v1/vex/webhooks
+ *     token: 'my-session-uuid'
  * });
+ *
+ * // Segunda chamada com mesmo token - RETORNA A MESMA INSTÂNCIA
+ * const sock2 = makeWASocket({
+ *     url: 'http://localhost:5342',
+ *     apiKey: 'your-api-key',
+ *     token: 'my-session-uuid'
+ * });
+ *
+ * console.log(sock1 === sock2); // true!
+ *
+ * // Ou use getInstance() para obter instância existente
+ * const sock3 = getInstance('my-session-uuid');
  * ```
  */
 export const makeWASocket = (config: VexClientConfig): VexClient => {
+    // SINGLETON: Se já existe uma instância para este token, retorna ela
+    if (config.token) {
+        const existing = instanceRegistry.get(config.token);
+        if (existing && !existing['_isDestroyed']) {
+            console.log(`[VexSDK] Reusing existing instance for session ${config.token}`);
+            return existing;
+        }
+    }
+
+    // Cria nova instância
     return new VexClient(config);
 };
 
@@ -1651,3 +1809,6 @@ export const makeWASocket = (config: VexClientConfig): VexClient => {
 export { WebhookParser } from "./lib/WebhookParser";
 export { HttpClient, HttpClientConfig, VexApiError } from "./lib/HttpClient";
 export { SocketConnection, SocketConnectionConfig, SocketConnectionEvents } from "./lib/SocketConnection";
+
+// Re-export registry functions (já exportadas acima, mas reforçando a documentação)
+// getInstance, hasInstance, destroyInstance, listActiveSessions, destroyAllInstances

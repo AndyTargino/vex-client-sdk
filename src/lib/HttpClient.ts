@@ -27,12 +27,14 @@ export interface HttpClientConfig {
 export class VexApiError extends Error {
     public readonly statusCode: number;
     public readonly response: unknown;
+    public readonly retryAfter?: number; // Segundos para aguardar antes de retry (erro 429)
 
-    constructor(message: string, statusCode: number, response?: unknown) {
+    constructor(message: string, statusCode: number, response?: unknown, retryAfter?: number) {
         super(message);
         this.name = 'VexApiError';
         this.statusCode = statusCode;
         this.response = response;
+        this.retryAfter = retryAfter;
     }
 }
 
@@ -103,6 +105,9 @@ export class HttpClient {
                 // Não tentar novamente em erros de validação
                 if (error.response?.status === 400 || error.response?.status === 422) return false;
 
+                // NÃO tentar novamente em erro 429 (rate limiting) - deixa o VexClient gerenciar
+                if (error.response?.status === 429) return false;
+
                 // Tentar novamente em erros de rede e status >= 500
                 return axiosRetry.isNetworkOrIdempotentRequestError(error) ||
                     (error.response?.status ? error.response.status >= 500 : false);
@@ -169,10 +174,25 @@ export class HttpClient {
                         || error.message
                         || 'Unknown error';
 
+                    // Extrai retry-after para erro 429
+                    let retryAfter: number | undefined;
+                    if (error.response.status === 429) {
+                        const retryHeader = error.response.headers?.['retry-after'];
+                        if (retryHeader) {
+                            retryAfter = parseInt(retryHeader, 10);
+                        }
+                        // Se não tem header, usa 60s como padrão
+                        if (!retryAfter || isNaN(retryAfter)) {
+                            retryAfter = 60;
+                        }
+                        console.warn(`[VexSDK HttpClient] Rate limited (429). Retry after ${retryAfter}s`);
+                    }
+
                     throw new VexApiError(
                         message,
                         error.response.status,
-                        error.response.data
+                        error.response.data,
+                        retryAfter
                     );
                 }
 
