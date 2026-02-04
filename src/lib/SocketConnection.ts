@@ -49,6 +49,10 @@ export interface SocketConnectionConfig {
      * Use valores maiores para arquivos grandes (200-500MB)
      */
     messageTimeout?: number;
+    /** Intervalo de ping para keep-alive em ms (default: 25000) */
+    pingInterval?: number;
+    /** Timeout de ping em ms (default: 60000) */
+    pingTimeout?: number;
 }
 
 /**
@@ -94,7 +98,9 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
             reconnectDelay: 1000,
             maxReconnectDelay: 30000,
             messageTimeout: 300000,        // 5 minutos para envio de mensagens/arquivos grandes
-            clientId: `sdk_${Date.now()}`,
+            pingInterval: 25000,           // Ping a cada 25s para keep-alive
+            pingTimeout: 60000,            // 60s para timeout de ping
+            clientId: `sdk_${config.sessionUUID}`, // Usar sessionUUID como clientId para identificação
             ...config
         };
     }
@@ -137,18 +143,44 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
                 reject(new Error('Socket connection timeout'));
             }, this.config.connectionTimeout);
 
-            // Criar socket com autenticação
+            // Criar socket com autenticação e configuração para conexão PERSISTENTE
+            // Similar a como o Baileys mantém conexão com WhatsApp
             this.socket = io(this.config.url, {
+                // Autenticação
                 auth: {
                     apiKey: this.config.apiKey,
                     clientId: this.config.clientId
                 },
-                transports: ['websocket'], // Preferir WebSocket puro
+
+                // Transporte: WebSocket primeiro, polling como fallback
+                transports: ['websocket', 'polling'],
+                upgrade: true,              // Permite upgrade de polling para websocket
+
+                // RECONEXÃO AGRESSIVA - nunca desistir
                 reconnection: this.config.autoReconnect,
                 reconnectionAttempts: this.config.maxReconnectAttempts,
                 reconnectionDelay: this.config.reconnectDelay,
                 reconnectionDelayMax: this.config.maxReconnectDelay,
-                timeout: this.config.connectionTimeout
+                randomizationFactor: 0.5,   // Jitter para evitar thundering herd
+
+                // TIMEOUTS - configurados para conexão estável
+                timeout: this.config.connectionTimeout,
+
+                // KEEP-ALIVE - mantém conexão ativa
+                // Nota: pingInterval e pingTimeout são configurados no servidor
+                // O cliente usa ackTimeout para operações
+
+                // Evitar criar múltiplas conexões
+                forceNew: false,
+                multiplex: true,
+
+                // Auto-conectar
+                autoConnect: true,
+
+                // Compressão (se disponível)
+                perMessageDeflate: {
+                    threshold: 2048  // Comprimir mensagens > 2KB
+                }
             });
 
             // Handler de conexão bem-sucedida
@@ -180,18 +212,32 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
 
     /**
      * Configura handlers de eventos do Socket.IO
+     * Implementa estratégia de conexão PERSISTENTE similar ao Baileys
      */
     private setupEventHandlers(): void {
         if (!this.socket) return;
 
-        // Eventos de conexão
+        // ========== EVENTOS DE DESCONEXÃO ==========
         this.socket.on('disconnect', (reason: string) => {
             this._isConnected = false;
             this._isSubscribed = false;
             console.log('[VexSDK:Socket] Disconnected:', reason);
             this.emit('socket:disconnected', reason);
+
+            // Se a desconexão foi iniciada pelo servidor, tenta reconectar manualmente
+            // "io server disconnect" = servidor fechou, "io client disconnect" = cliente fechou
+            // "transport close" = conexão perdida, "transport error" = erro de rede
+            if (reason === 'io server disconnect' || reason === 'transport close' || reason === 'transport error') {
+                console.log('[VexSDK:Socket] Server-side disconnect, attempting manual reconnect...');
+                // O socket.io já vai tentar reconectar automaticamente
+                // Mas garantimos que está habilitado
+                if (this.socket && !this.socket.connected && this.config.autoReconnect) {
+                    this.socket.connect();
+                }
+            }
         });
 
+        // ========== EVENTOS DE RECONEXÃO ==========
         this.socket.on('reconnect_attempt', (attempt: number) => {
             this._reconnectAttempts = attempt;
             console.log(`[VexSDK:Socket] Reconnecting... attempt ${attempt}`);
@@ -201,7 +247,7 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
         this.socket.on('reconnect', () => {
             this._isConnected = true;
             this._reconnectAttempts = 0;
-            console.log('[VexSDK:Socket] Reconnected');
+            console.log('[VexSDK:Socket] Reconnected successfully');
             this.emit('socket:connected');
 
             // Re-inscrever na sessão após reconexão
@@ -210,9 +256,32 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
             });
         });
 
+        this.socket.on('reconnect_error', (error: Error) => {
+            console.warn('[VexSDK:Socket] Reconnect error:', error.message);
+            // Não emitir erro aqui - vai continuar tentando
+        });
+
+        this.socket.on('reconnect_failed', () => {
+            console.error('[VexSDK:Socket] Reconnection failed after max attempts');
+            this.emit('socket:error', new Error('Reconnection failed'));
+        });
+
+        // ========== EVENTOS DE ERRO ==========
         this.socket.on('error', (error: Error | string) => {
             console.error('[VexSDK:Socket] Socket error:', error);
             this.emit('socket:error', error instanceof Error ? error : new Error(String(error)));
+        });
+
+        this.socket.on('connect_error', (error: Error) => {
+            console.error('[VexSDK:Socket] Connection error:', error.message);
+            // Não emitir erro aqui durante tentativas de reconexão
+            // O socket.io vai continuar tentando
+        });
+
+        // ========== PING/PONG PARA KEEP-ALIVE ==========
+        this.socket.on('ping', () => {
+            // Socket.IO envia pings automaticamente para manter a conexão
+            // Este evento é útil para debug
         });
 
         // Eventos de sessão
