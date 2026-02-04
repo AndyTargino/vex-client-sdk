@@ -390,7 +390,10 @@ export class VexClient {
 
             // Conecta via Socket.IO se habilitado (modo preferido - real-time e escalável)
             if (this._isSocketIOEnabled && !this._socketIOFailed) {
-                console.log(`[VexSDK] Connecting via Socket.IO to ${this.config.url}...`);
+                // Só loga se não está conectado ainda
+                if (!this._socketConnection?.isConnected) {
+                    console.log(`[VexSDK] Connecting via Socket.IO to ${this.config.url}...`);
+                }
                 await this.connectSocketIO();
                 // Health check não é necessário quando Socket.IO está ativo
                 // (Socket.IO já detecta desconexões automaticamente)
@@ -414,15 +417,27 @@ export class VexClient {
     /**
      * Conecta ao servidor via Socket.IO para receber eventos em tempo real
      * Muito mais eficiente que polling para alta escalabilidade
+     * IMPORTANTE: Mantém conexão existente se já estiver conectada
      */
     private async connectSocketIO(): Promise<void> {
         if (!this._sessionId || this._isDestroyed) return;
 
+        // Se já está conectado, não faz nada (preserva conexão)
+        if (this._socketConnection?.isConnected) {
+            console.log('[VexSDK] Socket.IO already connected, keeping existing connection');
+            return;
+        }
+
         try {
-            // Fecha conexão anterior se existir
-            if (this._socketConnection) {
+            // Só destrói se existir mas NÃO estiver conectado (conexão morta)
+            if (this._socketConnection && !this._socketConnection.isConnected) {
                 this._socketConnection.destroy();
                 this._socketConnection = null;
+            }
+
+            // Se já existe e está conectado, não cria nova
+            if (this._socketConnection) {
+                return;
             }
 
             const socketConfig: SocketConnectionConfig = {
@@ -430,7 +445,7 @@ export class VexClient {
                 apiKey: this.config.apiKey,
                 sessionUUID: this._sessionId,
                 clientId: `sdk_${this._sessionId}`,
-                connectionTimeout: this.config.socketIO?.connectionTimeout ?? 30000,
+                connectionTimeout: this.config.socketIO?.connectionTimeout ?? 60000, // 60s para redes lentas
                 autoReconnect: this.config.socketIO?.autoReconnect ?? true,
                 maxReconnectAttempts: this.config.socketIO?.maxReconnectAttempts ?? Infinity,
                 reconnectDelay: this.config.socketIO?.reconnectDelay ?? 1000,
@@ -907,6 +922,7 @@ export class VexClient {
 
     /**
      * Reconecta a sessão existente
+     * IMPORTANTE: Mantém a conexão Socket.IO ativa (não destrói)
      */
     public async reconnect(): Promise<void> {
         if (this._isDestroyed) {
@@ -920,17 +936,53 @@ export class VexClient {
         this._connectionStatus = 'connecting';
         this.ev.emit("connection.update", { connection: "connecting" });
 
-        // Reset contadores e estado do Socket.IO
+        // Reset contadores
         this._reconnectAttempts = 0;
-        this._socketIOFailed = false; // Dá nova chance ao Socket.IO
 
-        // Desconecta Socket.IO atual se existir
-        if (this._socketConnection) {
-            this._socketConnection.destroy();
-            this._socketConnection = null;
+        // NÃO destrói Socket.IO - ele é independente da sessão Baileys
+        // O Socket.IO continua recebendo eventos enquanto o servidor reconecta o WhatsApp
+
+        // Apenas chama HTTP init para pedir ao servidor que reconecte o Baileys
+        try {
+            const webhookUrl = this.buildWebhookUrl();
+
+            const response = await this.http.post<{
+                sessionUUID: string;
+                status: string;
+                qrCode?: string;
+                phoneNumber?: string;
+                isConnected: boolean;
+            }>("/sessions/init", {
+                sessionUUID: this._sessionId,
+                webhookUrl,
+                metadata: this.config.metadata
+            });
+
+            // Atualiza estado
+            this._lastQrCode = response.qrCode || null;
+            this._lastStatus = response.status;
+            this._lastPhoneNumber = response.phoneNumber || null;
+
+            if (response.isConnected) {
+                this._connectionStatus = 'open';
+                this.ev.emit("connection.update", { connection: "open" });
+            } else if (response.qrCode) {
+                this._connectionStatus = 'qrcode';
+                this.ev.emit("connection.update", { qrCode: response.qrCode });
+            } else {
+                this._connectionStatus = 'connecting';
+            }
+
+            // Se Socket.IO não está conectado, tenta conectar
+            if (!this._socketConnection?.isConnected && this._isSocketIOEnabled) {
+                this._socketIOFailed = false;
+                await this.connectSocketIO();
+            }
+
+        } catch (error) {
+            console.error("[VexSDK] Reconnect failed:", error);
+            throw error;
         }
-
-        await this.initialize();
     }
 
     /**
