@@ -9,6 +9,7 @@ import {
 import EventEmitter from "eventemitter3";
 import { HttpClient, HttpClientConfig } from "./lib/HttpClient";
 import { WebhookParser } from "./lib/WebhookParser";
+import { SocketConnection, SocketConnectionConfig } from "./lib/SocketConnection";
 
 export type WABotEvents = BaileysEventMap;
 
@@ -29,11 +30,11 @@ export interface VexClientConfig {
     /** Chave de Segurança da API (API_SECRET_KEY) */
     apiKey: string;
     /**
-     * URL base da sua aplicação para receber webhooks
-     * O SDK automaticamente adiciona /api/v1/vex/webhooks
-     * Exemplo: 'https://sua-app.com' -> 'https://sua-app.com/api/v1/vex/webhooks'
+     * URL base da sua aplicação para receber webhooks (OPCIONAL)
+     * Se não fornecido, o SDK usa polling interno para receber eventos
+     * Se fornecido, o SDK registra o webhook no servidor
      */
-    backendUrl: string;
+    backendUrl?: string;
     /** Metadados customizados para a sessão */
     metadata?: Record<string, unknown>;
     /** Configuração de retry para requisições HTTP */
@@ -58,6 +59,31 @@ export interface VexClientConfig {
     };
     /** Intervalo do health check em ms (default: 30000, 0 para desabilitar) */
     healthCheckInterval?: number;
+    /**
+     * Intervalo do polling em ms (default: 5000)
+     * O polling busca atualizações de QR code, status e eventos do servidor
+     * Usado como fallback quando Socket.IO falha
+     */
+    pollingInterval?: number;
+    /**
+     * Configuração do Socket.IO (recomendado para alta escalabilidade)
+     * Por padrão, o SDK usa Socket.IO para receber eventos em tempo real
+     * Se a conexão Socket.IO falhar, faz fallback para polling
+     */
+    socketIO?: {
+        /** Habilita Socket.IO (default: true) */
+        enabled?: boolean;
+        /** Timeout de conexão em ms (default: 30000) */
+        connectionTimeout?: number;
+        /** Habilitar reconexão automática do Socket.IO (default: true) */
+        autoReconnect?: boolean;
+        /** Máximo de tentativas de reconexão (default: Infinity) */
+        maxReconnectAttempts?: number;
+        /** Delay base para reconexão em ms (default: 1000) */
+        reconnectDelay?: number;
+        /** Delay máximo para reconexão em ms (default: 30000) */
+        maxReconnectDelay?: number;
+    };
 }
 
 /**
@@ -109,6 +135,19 @@ export interface GetContactsOptions {
     limit?: number;
     offset?: number;
     search?: string;
+}
+
+/**
+ * Conteúdo de mídia para envio via Socket.IO
+ * Suporta arquivos grandes de até 500MB via base64
+ */
+export interface MediaMessageContent {
+    text?: string;
+    image?: { url?: string; base64?: string; mimetype?: string; caption?: string };
+    document?: { url?: string; base64?: string; filename?: string; mimetype?: string };
+    audio?: { url?: string; base64?: string; mimetype?: string; ptt?: boolean };
+    video?: { url?: string; base64?: string; mimetype?: string; caption?: string };
+    sticker?: { url?: string; base64?: string; mimetype?: string };
 }
 
 /**
@@ -190,6 +229,18 @@ export class VexClient {
     private _healthCheckTimer: ReturnType<typeof setInterval> | null = null;
     private _isReconnecting: boolean = false;
     private _isDestroyed: boolean = false;
+
+    // Polling interno (fallback quando Socket.IO falha)
+    private _pollingTimer: ReturnType<typeof setInterval> | null = null;
+    private _lastQrCode: string | null = null;
+    private _lastStatus: string | null = null;
+    private _lastPhoneNumber: string | null = null;
+    private _isPollingEnabled: boolean = false;
+
+    // Socket.IO (modo principal - alta performance)
+    private _socketConnection: SocketConnection | null = null;
+    private _isSocketIOEnabled: boolean = true;
+    private _socketIOFailed: boolean = false;
 
     constructor(config: VexClientConfig) {
         this.config = config;
@@ -279,10 +330,12 @@ export class VexClient {
     }
 
     /**
-     * Constrói a URL completa do webhook
-     * IMPORTANTE: O endpoint DEVE ser /api/v1/vex/webhooks para compatibilidade
+     * Constrói a URL completa do webhook (se backendUrl estiver configurado)
      */
-    private buildWebhookUrl(): string {
+    private buildWebhookUrl(): string | undefined {
+        if (!this.config.backendUrl) {
+            return undefined;
+        }
         const baseUrl = this.config.backendUrl.replace(/\/+$/, ''); // Remove trailing slashes
         return `${baseUrl}${VEX_WEBHOOK_PATH}`;
     }
@@ -294,9 +347,16 @@ export class VexClient {
         try {
             const webhookUrl = this.buildWebhookUrl();
 
+            // Determina modo de operação:
+            // 1. Se tem webhookUrl: usa webhook (servidor envia eventos via HTTP)
+            // 2. Se não tem webhookUrl e Socket.IO habilitado: usa Socket.IO (real-time)
+            // 3. Fallback: polling (quando Socket.IO falha)
+            this._isSocketIOEnabled = this.config.socketIO?.enabled !== false && !webhookUrl;
+            this._isPollingEnabled = false; // Só habilita se Socket.IO falhar
+
             const response = await this.http.post<InitSessionResponse>("/sessions/init", {
                 sessionUUID: this.config.token,
-                webhookUrl,
+                webhookUrl, // undefined se não configurado - servidor não enviará webhooks
                 metadata: this.config.metadata
             });
 
@@ -306,6 +366,11 @@ export class VexClient {
                 id: this.id,
                 name: response.phoneNumber
             };
+
+            // Salva estado inicial para comparação no polling
+            this._lastQrCode = response.qrCode || null;
+            this._lastStatus = response.status;
+            this._lastPhoneNumber = response.phoneNumber || null;
 
             // Reset do contador de reconexão após sucesso
             this._reconnectAttempts = 0;
@@ -323,13 +388,160 @@ export class VexClient {
                 this.ev.emit("connection.update", { connection: "connecting" });
             }
 
-            // Inicia health check se configurado
-            this.startHealthCheck();
+            // Conecta via Socket.IO se habilitado (modo preferido - real-time e escalável)
+            if (this._isSocketIOEnabled && !this._socketIOFailed) {
+                console.log(`[VexSDK] Connecting via Socket.IO to ${this.config.url}...`);
+                await this.connectSocketIO();
+                // Health check não é necessário quando Socket.IO está ativo
+                // (Socket.IO já detecta desconexões automaticamente)
+            } else if (!webhookUrl) {
+                // Fallback para polling se Socket.IO desabilitado ou falhou
+                console.log('[VexSDK] Socket.IO disabled/failed, using HTTP polling');
+                this.startPolling();
+                // Inicia health check apenas no modo polling
+                this.startHealthCheck();
+            } else {
+                // Modo webhook - não precisa de polling nem Socket.IO no cliente
+                console.log('[VexSDK] Using webhook mode (events via HTTP)');
+            }
 
         } catch (error) {
             console.error("[VexSDK] Failed to initialize session:", error);
             throw error;
         }
+    }
+
+    /**
+     * Conecta ao servidor via Socket.IO para receber eventos em tempo real
+     * Muito mais eficiente que polling para alta escalabilidade
+     */
+    private async connectSocketIO(): Promise<void> {
+        if (!this._sessionId || this._isDestroyed) return;
+
+        try {
+            // Fecha conexão anterior se existir
+            if (this._socketConnection) {
+                this._socketConnection.destroy();
+                this._socketConnection = null;
+            }
+
+            const socketConfig: SocketConnectionConfig = {
+                url: this.config.url,
+                apiKey: this.config.apiKey,
+                sessionUUID: this._sessionId,
+                clientId: `sdk_${this._sessionId}`,
+                connectionTimeout: this.config.socketIO?.connectionTimeout ?? 30000,
+                autoReconnect: this.config.socketIO?.autoReconnect ?? true,
+                maxReconnectAttempts: this.config.socketIO?.maxReconnectAttempts ?? Infinity,
+                reconnectDelay: this.config.socketIO?.reconnectDelay ?? 1000,
+                maxReconnectDelay: this.config.socketIO?.maxReconnectDelay ?? 30000
+            };
+
+            this._socketConnection = new SocketConnection(socketConfig);
+
+            // Configura handlers de eventos do Socket.IO
+            this.setupSocketIOHandlers();
+
+            // Conecta ao servidor
+            await this._socketConnection.connect();
+
+            console.log('[VexSDK] ✓ Socket.IO connected - polling/health-check disabled');
+
+            // Para o polling e health check (Socket.IO já detecta desconexões)
+            this.stopPolling();
+            this.stopHealthCheck();
+            this._isPollingEnabled = false;
+
+        } catch (error) {
+            console.error('[VexSDK] ✗ Socket.IO connection failed:', error);
+            console.warn('[VexSDK] Falling back to HTTP polling mode');
+            this._socketIOFailed = true;
+
+            // Limpa a conexão falha
+            if (this._socketConnection) {
+                this._socketConnection.destroy();
+                this._socketConnection = null;
+            }
+
+            // Fallback para polling + health check
+            this._isPollingEnabled = true;
+            this.startPolling();
+            this.startHealthCheck();
+        }
+    }
+
+    /**
+     * Configura os handlers de eventos do Socket.IO
+     */
+    private setupSocketIOHandlers(): void {
+        if (!this._socketConnection) return;
+
+        // Eventos de conexão do Socket.IO
+        this._socketConnection.on('socket:connected', () => {
+            console.log('[VexSDK] Socket.IO connected');
+        });
+
+        this._socketConnection.on('socket:disconnected', (reason) => {
+            console.log('[VexSDK] Socket.IO disconnected:', reason);
+
+            // Se desconectou inesperadamente e não está destruído, tenta reconectar
+            if (!this._isDestroyed && !this._socketConnection?.isConnected) {
+                // O Socket.IO tenta reconectar automaticamente
+                // Se falhar após várias tentativas, fallback para polling
+            }
+        });
+
+        this._socketConnection.on('socket:reconnecting', (attempt) => {
+            console.log(`[VexSDK] Socket.IO reconnecting... attempt ${attempt}`);
+        });
+
+        this._socketConnection.on('socket:error', (error) => {
+            console.error('[VexSDK] Socket.IO error:', error);
+
+            // Se erro persistir, pode fazer fallback para polling
+            if (!this._socketConnection?.isConnected && !this._isPollingEnabled) {
+                console.log('[VexSDK] Socket.IO failed, enabling polling fallback');
+                this._isPollingEnabled = true;
+                this.startPolling();
+            }
+        });
+
+        // Eventos de status da sessão vindos via Socket.IO
+        this._socketConnection.on('session:status', (payload) => {
+            // Atualiza estado interno
+            if (payload.status === 'connected') {
+                this._connectionStatus = 'open';
+                this._lastQrCode = null;
+                if (payload.phoneNumber) {
+                    this._lastPhoneNumber = payload.phoneNumber;
+                    this.user = {
+                        id: `${payload.phoneNumber}@s.whatsapp.net`,
+                        name: payload.phoneNumber
+                    };
+                    this.id = this.user.id;
+                }
+                this.ev.emit("connection.update", { connection: "open" });
+            } else if (payload.status === 'qrcode' && payload.qrCode) {
+                this._connectionStatus = 'qrcode';
+                this._lastQrCode = payload.qrCode;
+                this.ev.emit("connection.update", { qrCode: payload.qrCode });
+            } else if (payload.status === 'disconnected' || payload.status === 'timeout') {
+                this._connectionStatus = 'close';
+                this.ev.emit("connection.update", {
+                    connection: "close",
+                    lastDisconnect: { error: new Error(payload.status), date: new Date() }
+                });
+            } else if (payload.status === 'connecting') {
+                this._connectionStatus = 'connecting';
+                this.ev.emit("connection.update", { connection: "connecting" });
+            }
+        });
+
+        // Eventos do Baileys forwarded via Socket.IO
+        this._socketConnection.on('baileys:event', (eventName, data) => {
+            // Injeta o evento no EventEmitter do SDK
+            this.injectEvent(eventName, data);
+        });
     }
 
     /**
@@ -517,6 +729,128 @@ export class VexClient {
     }
 
     /**
+     * Inicia o polling interno para buscar atualizações de status, QR code e eventos
+     * Usado quando backendUrl não é configurado (sem webhooks)
+     */
+    private startPolling(): void {
+        const interval = this.config.pollingInterval ?? 5000;
+
+        if (interval <= 0 || this._isDestroyed) return;
+
+        // Limpa timer existente
+        this.stopPolling();
+
+        console.log(`[VexSDK] Starting internal polling (interval: ${interval}ms)`);
+
+        this._pollingTimer = setInterval(async () => {
+            if (this._isDestroyed) {
+                this.stopPolling();
+                return;
+            }
+
+            await this.pollSessionStatus();
+        }, interval);
+    }
+
+    /**
+     * Para o polling interno
+     */
+    private stopPolling(): void {
+        if (this._pollingTimer) {
+            clearInterval(this._pollingTimer);
+            this._pollingTimer = null;
+        }
+    }
+
+    /**
+     * Faz polling do status da sessão e emite eventos se houver mudanças
+     */
+    private async pollSessionStatus(): Promise<void> {
+        if (!this._sessionId || this._isDestroyed) return;
+
+        try {
+            // Busca status atual da sessão
+            const response = await this.http.get<{
+                sessionUUID: string;
+                status: string;
+                qrCode?: string;
+                phoneNumber: string | null;
+                isConnected: boolean;
+                lastActivity: string | null;
+                reconnectCount: number;
+            }>(`/sessions/${this._sessionId}`);
+
+            // Verifica mudança de QR code
+            if (response.qrCode && response.qrCode !== this._lastQrCode) {
+                this._lastQrCode = response.qrCode;
+                this._connectionStatus = 'qrcode';
+                this.ev.emit("connection.update", { qrCode: response.qrCode });
+            }
+
+            // Verifica mudança de status
+            if (response.status !== this._lastStatus) {
+                const oldStatus = this._lastStatus;
+                this._lastStatus = response.status;
+
+                // Detecta conexão estabelecida
+                if (response.isConnected && oldStatus !== 'connected') {
+                    this._connectionStatus = 'open';
+                    this._lastQrCode = null; // Limpa QR code após conexão
+
+                    // Atualiza user com dados completos
+                    if (response.phoneNumber) {
+                        this._lastPhoneNumber = response.phoneNumber;
+                        this.user = {
+                            id: `${response.phoneNumber}@s.whatsapp.net`,
+                            name: response.phoneNumber
+                        };
+                        this.id = this.user.id;
+                    }
+
+                    this.ev.emit("connection.update", { connection: "open" });
+                }
+
+                // Detecta desconexão
+                if (!response.isConnected && oldStatus === 'connected') {
+                    this._connectionStatus = 'close';
+                    this.ev.emit("connection.update", {
+                        connection: "close",
+                        lastDisconnect: { error: new Error("Disconnected"), date: new Date() }
+                    });
+                }
+            }
+
+            // Busca novos eventos/mensagens pendentes
+            await this.pollEvents();
+
+        } catch (error) {
+            // Ignora erros silenciosamente - o health check trata problemas de conexão
+            console.debug("[VexSDK] Polling error:", error);
+        }
+    }
+
+    /**
+     * Busca eventos pendentes do servidor (mensagens, atualizações, etc)
+     */
+    private async pollEvents(): Promise<void> {
+        if (!this._sessionId || this._isDestroyed || this._connectionStatus !== 'open') return;
+
+        try {
+            const response = await this.http.get<{
+                events: Array<{ event: string; data: unknown; timestamp: number }>;
+            }>(`/sessions/${this._sessionId}/events`);
+
+            if (response.events && response.events.length > 0) {
+                for (const { event, data } of response.events) {
+                    this.injectEvent(event, data);
+                }
+            }
+        } catch {
+            // Endpoint pode não existir em versões antigas do servidor - ignora silenciosamente
+        }
+    }
+
+    /**
      * Força uma tentativa de reconexão imediata
      */
     public async forceReconnect(): Promise<void> {
@@ -547,6 +881,13 @@ export class VexClient {
         }
 
         this.stopHealthCheck();
+        this.stopPolling();
+
+        // Desconecta Socket.IO
+        if (this._socketConnection) {
+            this._socketConnection.destroy();
+            this._socketConnection = null;
+        }
 
         // Emite evento de fechamento
         this._connectionStatus = 'close';
@@ -579,8 +920,15 @@ export class VexClient {
         this._connectionStatus = 'connecting';
         this.ev.emit("connection.update", { connection: "connecting" });
 
-        // Reset contadores
+        // Reset contadores e estado do Socket.IO
         this._reconnectAttempts = 0;
+        this._socketIOFailed = false; // Dá nova chance ao Socket.IO
+
+        // Desconecta Socket.IO atual se existir
+        if (this._socketConnection) {
+            this._socketConnection.destroy();
+            this._socketConnection = null;
+        }
 
         await this.initialize();
     }
@@ -591,12 +939,20 @@ export class VexClient {
     public async logout(): Promise<void> {
         this.ensureInitialized();
 
-        // Para reconexão automática
+        // Para reconexão automática, polling e Socket.IO
         if (this._reconnectTimer) {
             clearTimeout(this._reconnectTimer);
             this._reconnectTimer = null;
         }
         this.stopHealthCheck();
+        this.stopPolling();
+
+        // Desconecta Socket.IO
+        if (this._socketConnection) {
+            this._socketConnection.destroy();
+            this._socketConnection = null;
+        }
+
         this._isReconnecting = false;
 
         await this.http.delete(`/sessions/${this._sessionId}`);
@@ -701,6 +1057,144 @@ export class VexClient {
      */
     public async sendText(jid: string, text: string): Promise<proto.WebMessageInfo | undefined> {
         return this.sendMessage(jid, { text });
+    }
+
+    /**
+     * Tipo de mensagem para envio rápido via Socket.IO
+     */
+    private buildSocketMessage(message: MediaMessageContent): Parameters<SocketConnection['sendMessage']>[1] {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return message as any;
+    }
+
+    /**
+     * Envia mensagem via Socket.IO (mais rápido que HTTP)
+     * Usa automaticamente Socket.IO se conectado, caso contrário usa HTTP
+     * Suporta arquivos grandes de até 500MB via base64
+     *
+     * @param jid - JID do destinatário (ex: 5511999999999@s.whatsapp.net)
+     * @param message - Conteúdo da mensagem
+     * @param timeout - Timeout em ms (default: 5 minutos)
+     *
+     * @example
+     * // Enviar imagem via base64 (mais rápido)
+     * await sock.sendMessageFast('5511999999999@s.whatsapp.net', {
+     *     image: { base64: imageBase64, mimetype: 'image/jpeg', caption: 'Foto!' }
+     * });
+     *
+     * // Enviar documento preservando nome original
+     * await sock.sendMessageFast('5511999999999@s.whatsapp.net', {
+     *     document: { base64: fileBase64, filename: 'Relatório.pdf', mimetype: 'application/pdf' }
+     * });
+     */
+    public async sendMessageFast(
+        jid: string,
+        message: MediaMessageContent,
+        timeout?: number
+    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+        this.ensureInitialized();
+
+        // Se Socket.IO está conectado, usa ele (mais rápido)
+        if (this._socketConnection?.isConnected) {
+            return this._socketConnection.sendMessage(jid, this.buildSocketMessage(message), timeout);
+        }
+
+        // Fallback para HTTP
+        const response = await this.http.post<{ messageId: string; status: string }>(
+            `/sessions/${this._sessionId}/messages`,
+            { to: jid, message }
+        );
+
+        return {
+            success: true,
+            messageId: response.messageId
+        };
+    }
+
+    /**
+     * Envia imagem via Socket.IO (atalho)
+     * @param jid - JID do destinatário
+     * @param image - Imagem como URL ou base64
+     * @param caption - Legenda opcional
+     */
+    public async sendImage(
+        jid: string,
+        image: { url: string } | { base64: string; mimetype: string },
+        caption?: string
+    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+        return this.sendMessageFast(jid, {
+            image: { ...image, caption } as any
+        });
+    }
+
+    /**
+     * Envia documento via Socket.IO (atalho)
+     * @param jid - JID do destinatário
+     * @param document - Documento como URL ou base64
+     * @param filename - Nome do arquivo (preservado no WhatsApp)
+     * @param mimetype - MIME type do arquivo
+     */
+    public async sendDocument(
+        jid: string,
+        document: { url: string } | { base64: string },
+        filename: string,
+        mimetype?: string
+    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+        return this.sendMessageFast(jid, {
+            document: { ...document, filename, mimetype: mimetype || 'application/octet-stream' } as any
+        });
+    }
+
+    /**
+     * Envia áudio via Socket.IO (atalho)
+     * @param jid - JID do destinatário
+     * @param audio - Áudio como URL ou base64
+     * @param ptt - Push-to-talk (mensagem de voz) - default: false
+     */
+    public async sendAudio(
+        jid: string,
+        audio: { url: string } | { base64: string; mimetype?: string },
+        ptt: boolean = false
+    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+        return this.sendMessageFast(jid, {
+            audio: { ...audio, ptt } as any
+        });
+    }
+
+    /**
+     * Envia vídeo via Socket.IO (atalho)
+     * @param jid - JID do destinatário
+     * @param video - Vídeo como URL ou base64
+     * @param caption - Legenda opcional
+     */
+    public async sendVideo(
+        jid: string,
+        video: { url: string } | { base64: string; mimetype: string },
+        caption?: string
+    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+        return this.sendMessageFast(jid, {
+            video: { ...video, caption } as any
+        });
+    }
+
+    /**
+     * Envia sticker via Socket.IO (atalho)
+     * @param jid - JID do destinatário
+     * @param sticker - Sticker como URL ou base64
+     */
+    public async sendSticker(
+        jid: string,
+        sticker: { url: string } | { base64: string; mimetype?: string }
+    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+        return this.sendMessageFast(jid, { sticker: sticker as any });
+    }
+
+    /**
+     * Verifica se o Socket.IO está conectado
+     * Útil para decidir qual método de envio usar
+     */
+    public get isSocketConnected(): boolean {
+        return this._socketConnection?.isConnected ?? false;
     }
 
     /**
@@ -1104,3 +1598,4 @@ export const makeWASocket = (config: VexClientConfig): VexClient => {
 // Re-exports para compatibilidade
 export { WebhookParser } from "./lib/WebhookParser";
 export { HttpClient, HttpClientConfig, VexApiError } from "./lib/HttpClient";
+export { SocketConnection, SocketConnectionConfig, SocketConnectionEvents } from "./lib/SocketConnection";

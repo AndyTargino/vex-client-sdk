@@ -4,6 +4,15 @@ Baileys-compatible SDK client for connecting to VEX WhatsApp Microservice. Integ
 
 > **Server Access:** The VEX Server (backend with Baileys) is a private service. To get access to the server that powers this SDK, please contact: **andytargino@outlook.com**
 
+## Features
+
+- **Socket.IO Real-time:** Primary event delivery via WebSocket (lowest latency)
+- **HTTP Polling Fallback:** Automatic fallback when Socket.IO fails
+- **Optional Webhooks:** Traditional webhook delivery for serverless environments
+- **Baileys Compatible:** Same interface and events as Baileys
+- **Large File Support:** Send files up to 500MB via base64
+- **Auto-reconnection:** Exponential backoff with configurable attempts
+
 ## Installation
 
 ```bash
@@ -11,25 +20,28 @@ Baileys-compatible SDK client for connecting to VEX WhatsApp Microservice. Integ
 npm install github:AndyTargino/vex-client-sdk
 
 # Specific version
-npm install github:AndyTargino/vex-client-sdk#v1.1.0
+npm install github:AndyTargino/vex-client-sdk#v1.2.0
 ```
 
 ## Quick Start
 
-```typescript
-import { makeWASocket, VEX_WEBHOOK_PATH } from '@vex/client-sdk';
+### Simple Mode (Socket.IO + Polling)
 
-// Create VEX client
+No webhook server required - events are received via Socket.IO with HTTP polling fallback.
+
+```typescript
+import { makeWASocket } from '@vex/client-sdk';
+
+// Create VEX client - no backendUrl needed
 const sock = makeWASocket({
     url: 'https://your-vex-server.com',
-    apiKey: 'your-api-key',
-    backendUrl: 'https://your-app.com'  // Webhooks will be sent to /api/v1/vex/webhooks
+    apiKey: 'your-api-key'
 });
 
 // Wait for initialization
 await sock.waitForInit();
 
-// Listen to events
+// Listen to events (received via Socket.IO)
 sock.ev.on('connection.update', (update) => {
     if (update.qrCode) {
         console.log('Scan the QR Code:', update.qrCode);
@@ -39,9 +51,25 @@ sock.ev.on('connection.update', (update) => {
     }
 });
 
+sock.ev.on('messages.upsert', ({ messages }) => {
+    console.log('New message:', messages[0]);
+});
+
 // Send a message
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
     text: 'Hello from VEX SDK!'
+});
+```
+
+### With Webhooks (Optional)
+
+For serverless environments or when you need webhook delivery:
+
+```typescript
+const sock = makeWASocket({
+    url: 'https://your-vex-server.com',
+    apiKey: 'your-api-key',
+    backendUrl: 'https://your-app.com'  // Webhooks sent to /api/v1/vex/webhooks
 });
 ```
 
@@ -53,13 +81,21 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
 |----------|------|----------|-------------|
 | `url` | `string` | Yes | VEX Microservice URL |
 | `apiKey` | `string` | Yes | API Key (API_SECRET_KEY) |
-| `backendUrl` | `string` | Yes | Your backend base URL (webhooks sent to `/api/v1/vex/webhooks`) |
+| `backendUrl` | `string` | No | Your backend URL for webhooks (optional) |
 | `token` | `string` | No | Existing session UUID (for reconnection) |
 | `metadata` | `object` | No | Custom session metadata |
-| `retry.maxRetries` | `number` | No | Max retry attempts (default: 5) |
-| `retry.baseDelay` | `number` | No | Base delay in ms (default: 1000) |
+| `pollingInterval` | `number` | No | Polling interval in ms (default: 5000) |
 
-> **IMPORTANT:** The SDK automatically appends `/api/v1/vex/webhooks` to your `backendUrl`. Your backend MUST expose this endpoint to receive VEX events.
+### Socket.IO Configuration
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `socketIO.enabled` | `boolean` | `true` | Enable Socket.IO for real-time events |
+| `socketIO.connectionTimeout` | `number` | `60000` | Connection timeout in ms |
+| `socketIO.autoReconnect` | `boolean` | `true` | Enable auto-reconnection |
+| `socketIO.maxReconnectAttempts` | `number` | `Infinity` | Max reconnection attempts |
+| `socketIO.reconnectDelay` | `number` | `1000` | Base delay between reconnections |
+| `socketIO.maxReconnectDelay` | `number` | `30000` | Max delay between reconnections |
 
 ### Full Configuration Example
 
@@ -67,8 +103,7 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
 const sock = makeWASocket({
     url: 'https://your-vex-server.com',
     apiKey: process.env.VEX_API_KEY,
-    backendUrl: 'https://my-app.com',  // Webhooks at: https://my-app.com/api/v1/vex/webhooks
-    token: 'existing-session-uuid', // optional
+    token: 'existing-session-uuid',
     metadata: {
         company: 'My Company',
         plan: 'premium'
@@ -76,9 +111,37 @@ const sock = makeWASocket({
     retry: {
         maxRetries: 3,
         baseDelay: 2000
-    }
+    },
+    socketIO: {
+        enabled: true,
+        connectionTimeout: 60000,
+        autoReconnect: true,
+        maxReconnectAttempts: 100,
+        reconnectDelay: 1000,
+        maxReconnectDelay: 30000
+    },
+    pollingInterval: 5000
 });
 ```
+
+## Event Delivery Modes
+
+The SDK supports three event delivery modes, used in this priority order:
+
+### 1. Socket.IO (Primary - Recommended)
+- **Latency:** ~50ms
+- **Setup:** Automatic, no configuration needed
+- **Use case:** Best for all scenarios, lowest latency
+
+### 2. HTTP Polling (Fallback)
+- **Latency:** Depends on `pollingInterval` (default 5s)
+- **Setup:** Automatic fallback when Socket.IO fails
+- **Use case:** Firewall restrictions, network issues
+
+### 3. Webhooks (Optional)
+- **Latency:** ~100-500ms
+- **Setup:** Requires `backendUrl` and exposed endpoint
+- **Use case:** Serverless environments, event persistence
 
 ## Client Properties
 
@@ -88,6 +151,7 @@ const sock = makeWASocket({
 | `user` | `{ id: string; name?: string }` | Connected user data |
 | `sessionId` | `string` | Session UUID |
 | `connectionStatus` | `'connecting' \| 'open' \| 'close' \| 'qrcode'` | Connection status |
+| `isSocketConnected` | `boolean` | Socket.IO connection status |
 
 ---
 
@@ -160,7 +224,7 @@ console.log(`Removed: ${result.total} records`);
 ### Messages
 
 #### `sendMessage(jid, content, options?): Promise<WebMessageInfo>`
-Send a message to a contact or group.
+Send a message via HTTP (compatible with Baileys).
 
 ```typescript
 // Simple text
@@ -168,7 +232,7 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
     text: 'Hello!'
 });
 
-// Image
+// Image with URL
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
     image: { url: 'https://example.com/image.jpg' },
     caption: 'Check this image!'
@@ -181,30 +245,6 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
     mimetype: 'application/pdf'
 });
 
-// Audio
-await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    audio: { url: 'https://example.com/audio.mp3' },
-    mimetype: 'audio/mp3'
-});
-
-// Location
-await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    location: {
-        degreesLatitude: -23.5505,
-        degreesLongitude: -46.6333
-    }
-});
-
-// Contact
-await sock.sendMessage('5511999999999@s.whatsapp.net', {
-    contacts: {
-        displayName: 'John Doe',
-        contacts: [{
-            vcard: 'BEGIN:VCARD\nVERSION:3.0\nFN:John Doe\nTEL:+5511999999999\nEND:VCARD'
-        }]
-    }
-});
-
 // Reply to message
 await sock.sendMessage('5511999999999@s.whatsapp.net', {
     text: 'This is a reply!'
@@ -213,11 +253,92 @@ await sock.sendMessage('5511999999999@s.whatsapp.net', {
 });
 ```
 
+#### `sendMessageFast(jid, message, timeout?): Promise<{ success: boolean; messageId?: string; error?: string }>`
+Send message via Socket.IO for faster delivery. Supports large files up to 500MB via base64.
+
+```typescript
+// Send text fast
+await sock.sendMessageFast('5511999999999@s.whatsapp.net', {
+    text: 'Fast message!'
+});
+
+// Send image with base64 (faster than URL)
+await sock.sendMessageFast('5511999999999@s.whatsapp.net', {
+    image: {
+        base64: imageBase64,
+        mimetype: 'image/jpeg',
+        caption: 'Photo!'
+    }
+});
+
+// Send large document (up to 500MB)
+await sock.sendMessageFast('5511999999999@s.whatsapp.net', {
+    document: {
+        base64: fileBase64,
+        filename: 'Report Q1 2026.pdf',  // Filename preserved!
+        mimetype: 'application/pdf'
+    }
+}, 600000); // 10 minute timeout for large files
+```
+
 #### `sendText(jid, text): Promise<WebMessageInfo>`
 Shortcut for sending plain text.
 
 ```typescript
 await sock.sendText('5511999999999@s.whatsapp.net', 'Quick message!');
+```
+
+#### `sendImage(jid, image, caption?): Promise<{ success: boolean; messageId?: string }>`
+Send image via Socket.IO.
+
+```typescript
+// Via URL
+await sock.sendImage('5511999999999@s.whatsapp.net', { url: 'https://example.com/image.jpg' }, 'Caption');
+
+// Via base64
+await sock.sendImage('5511999999999@s.whatsapp.net', {
+    base64: imageBase64,
+    mimetype: 'image/jpeg'
+}, 'Photo caption');
+```
+
+#### `sendDocument(jid, document, filename, mimetype?): Promise<{ success: boolean; messageId?: string }>`
+Send document via Socket.IO.
+
+```typescript
+// Via URL
+await sock.sendDocument('5511999999999@s.whatsapp.net', { url: 'https://example.com/file.pdf' }, 'report.pdf');
+
+// Via base64 (supports up to 500MB)
+await sock.sendDocument('5511999999999@s.whatsapp.net', { base64: fileBase64 }, 'Report.pdf', 'application/pdf');
+```
+
+#### `sendAudio(jid, audio, ptt?): Promise<{ success: boolean; messageId?: string }>`
+Send audio via Socket.IO.
+
+```typescript
+// Normal audio
+await sock.sendAudio('5511999999999@s.whatsapp.net', { url: 'https://example.com/audio.mp3' });
+
+// Voice message (PTT)
+await sock.sendAudio('5511999999999@s.whatsapp.net', { base64: audioBase64, mimetype: 'audio/ogg' }, true);
+```
+
+#### `sendVideo(jid, video, caption?): Promise<{ success: boolean; messageId?: string }>`
+Send video via Socket.IO.
+
+```typescript
+await sock.sendVideo('5511999999999@s.whatsapp.net', {
+    base64: videoBase64,
+    mimetype: 'video/mp4'
+}, 'Check this video!');
+```
+
+#### `sendSticker(jid, sticker): Promise<{ success: boolean; messageId?: string }>`
+Send sticker via Socket.IO.
+
+```typescript
+await sock.sendSticker('5511999999999@s.whatsapp.net', { base64: stickerBase64, mimetype: 'image/webp' });
 ```
 
 #### `readMessages(keys): Promise<void>`
@@ -238,18 +359,10 @@ React to a message with an emoji.
 
 ```typescript
 // Add reaction
-await sock.sendReaction(
-    '5511999999999@s.whatsapp.net',
-    'ABC123',
-    '👍'
-);
+await sock.sendReaction('5511999999999@s.whatsapp.net', 'ABC123', '👍');
 
 // Remove reaction
-await sock.sendReaction(
-    '5511999999999@s.whatsapp.net',
-    'ABC123',
-    '' // empty string removes
-);
+await sock.sendReaction('5511999999999@s.whatsapp.net', 'ABC123', '');
 ```
 
 #### `deleteMessage(jid, messageId, fromMe?, forEveryone?): Promise<void>`
@@ -257,20 +370,10 @@ Delete a message.
 
 ```typescript
 // Delete for everyone
-await sock.deleteMessage(
-    '5511999999999@s.whatsapp.net',
-    'ABC123',
-    true,  // fromMe
-    true   // forEveryone
-);
+await sock.deleteMessage('5511999999999@s.whatsapp.net', 'ABC123', true, true);
 
 // Delete only for me
-await sock.deleteMessage(
-    '5511999999999@s.whatsapp.net',
-    'ABC123',
-    false, // fromMe
-    false  // forEveryone
-);
+await sock.deleteMessage('5511999999999@s.whatsapp.net', 'ABC123', false, false);
 ```
 
 ---
@@ -281,11 +384,7 @@ await sock.deleteMessage(
 Check if phone numbers exist on WhatsApp.
 
 ```typescript
-const results = await sock.onWhatsApp(
-    '5511999999999',
-    '5511888888888@s.whatsapp.net'
-);
-
+const results = await sock.onWhatsApp('5511999999999', '5511888888888');
 results.forEach(r => {
     console.log(`${r.jid}: ${r.exists ? 'Exists' : 'Does not exist'}`);
 });
@@ -346,10 +445,7 @@ console.log(status?.status); // "Available"
 Block or unblock a contact.
 
 ```typescript
-// Block
 await sock.updateBlockStatus('5511999999999@s.whatsapp.net', 'block');
-
-// Unblock
 await sock.updateBlockStatus('5511999999999@s.whatsapp.net', 'unblock');
 ```
 
@@ -358,7 +454,6 @@ Get business profile of a business account.
 
 ```typescript
 const profile = await sock.getBusinessProfile('5511999999999@s.whatsapp.net');
-console.log(profile);
 ```
 
 ---
@@ -371,9 +466,6 @@ Update presence status.
 ```typescript
 // Online globally
 await sock.sendPresenceUpdate('available');
-
-// Offline
-await sock.sendPresenceUpdate('unavailable');
 
 // Typing in specific chat
 await sock.sendPresenceUpdate('composing', '5511999999999@s.whatsapp.net');
@@ -391,7 +483,6 @@ Subscribe to receive presence updates from a contact.
 ```typescript
 await sock.presenceSubscribe('5511999999999@s.whatsapp.net');
 
-// Now you'll receive presence.update events for this contact
 sock.ev.on('presence.update', (update) => {
     console.log(`${update.id} is ${update.presences[update.id].lastKnownPresence}`);
 });
@@ -405,23 +496,14 @@ sock.ev.on('presence.update', (update) => {
 Modify chat settings.
 
 ```typescript
-// Archive
+// Archive/Unarchive
 await sock.chatModify({ archive: true }, '5511999999999@s.whatsapp.net');
-
-// Unarchive
-await sock.chatModify({ archive: false }, '5511999999999@s.whatsapp.net');
 
 // Mute for 8 hours
 await sock.chatModify({ mute: 8 * 60 * 60 * 1000 }, '5511999999999@s.whatsapp.net');
 
-// Unmute
-await sock.chatModify({ mute: null }, '5511999999999@s.whatsapp.net');
-
-// Pin chat
+// Pin/Unpin
 await sock.chatModify({ pin: true }, '5511999999999@s.whatsapp.net');
-
-// Unpin
-await sock.chatModify({ pin: false }, '5511999999999@s.whatsapp.net');
 ```
 
 ---
@@ -433,7 +515,6 @@ List all groups you participate in.
 
 ```typescript
 const groups = await sock.groupFetchAllParticipating();
-
 Object.entries(groups).forEach(([jid, metadata]) => {
     console.log(`${metadata.subject}: ${metadata.participants.length} members`);
 });
@@ -447,7 +528,6 @@ const group = await sock.groupMetadata('123456789@g.us');
 console.log({
     name: group.subject,
     description: group.desc,
-    creator: group.owner,
     members: group.participants.length
 });
 ```
@@ -460,7 +540,6 @@ const newGroup = await sock.groupCreate('My New Group', [
     '5511999999999@s.whatsapp.net',
     '5511888888888@s.whatsapp.net'
 ]);
-
 console.log(`Group created: ${newGroup.id}`);
 ```
 
@@ -475,7 +554,7 @@ await sock.groupUpdateSubject('123456789@g.us', 'New Group Name');
 Update group description.
 
 ```typescript
-await sock.groupUpdateDescription('123456789@g.us', 'New group description');
+await sock.groupUpdateDescription('123456789@g.us', 'New description');
 ```
 
 #### `groupSettingUpdate(jid, setting): Promise<void>`
@@ -487,45 +566,16 @@ await sock.groupSettingUpdate('123456789@g.us', 'announcement');
 
 // Everyone can send messages
 await sock.groupSettingUpdate('123456789@g.us', 'not_announcement');
-
-// Only admins can edit group info
-await sock.groupSettingUpdate('123456789@g.us', 'locked');
-
-// Everyone can edit group info
-await sock.groupSettingUpdate('123456789@g.us', 'unlocked');
 ```
 
 #### `groupParticipantsUpdate(jid, participants, action): Promise<{ status: string; jid: string }[]>`
 Manage group participants.
 
 ```typescript
-// Add members
-await sock.groupParticipantsUpdate(
-    '123456789@g.us',
-    ['5511999999999@s.whatsapp.net'],
-    'add'
-);
-
-// Remove members
-await sock.groupParticipantsUpdate(
-    '123456789@g.us',
-    ['5511999999999@s.whatsapp.net'],
-    'remove'
-);
-
-// Promote to admin
-await sock.groupParticipantsUpdate(
-    '123456789@g.us',
-    ['5511999999999@s.whatsapp.net'],
-    'promote'
-);
-
-// Demote from admin
-await sock.groupParticipantsUpdate(
-    '123456789@g.us',
-    ['5511999999999@s.whatsapp.net'],
-    'demote'
-);
+await sock.groupParticipantsUpdate('123456789@g.us', ['5511999999999@s.whatsapp.net'], 'add');
+await sock.groupParticipantsUpdate('123456789@g.us', ['5511999999999@s.whatsapp.net'], 'remove');
+await sock.groupParticipantsUpdate('123456789@g.us', ['5511999999999@s.whatsapp.net'], 'promote');
+await sock.groupParticipantsUpdate('123456789@g.us', ['5511999999999@s.whatsapp.net'], 'demote');
 ```
 
 #### `groupLeave(jid): Promise<void>`
@@ -548,17 +598,13 @@ Revoke invite code and generate a new one.
 
 ```typescript
 const newCode = await sock.groupRevokeInvite('123456789@g.us');
-console.log(`New link: https://chat.whatsapp.com/${newCode}`);
 ```
 
 #### `groupAcceptInvite(code): Promise<string>`
 Join a group using invite code.
 
 ```typescript
-// You can pass the code or full URL
 const groupJid = await sock.groupAcceptInvite('AbCdEfGhIjK');
-// or
-const groupJid = await sock.groupAcceptInvite('https://chat.whatsapp.com/AbCdEfGhIjK');
 ```
 
 ---
@@ -575,7 +621,6 @@ sock.ev.on('connection.update', (update) => {
     const { connection, qrCode, lastDisconnect } = update;
 
     if (qrCode) {
-        // Display QR Code to scan
         console.log('QR:', qrCode);
     }
 
@@ -598,20 +643,14 @@ New messages received.
 ```typescript
 sock.ev.on('messages.upsert', ({ messages, type }) => {
     for (const msg of messages) {
-        if (msg.key.fromMe) continue; // Ignore own messages
-
+        if (msg.key.fromMe) continue;
         console.log('New message:', msg.message?.conversation);
-
-        // Reply
-        await sock.sendMessage(msg.key.remoteJid, {
-            text: 'Message received!'
-        });
     }
 });
 ```
 
 ### messages.update
-Message status updates.
+Message status updates (sent, delivered, read).
 
 ```typescript
 sock.ev.on('messages.update', (updates) => {
@@ -622,7 +661,7 @@ sock.ev.on('messages.update', (updates) => {
 ```
 
 ### presence.update
-Presence updates.
+Presence updates (online, typing, etc).
 
 ```typescript
 sock.ev.on('presence.update', (update) => {
@@ -631,31 +670,37 @@ sock.ev.on('presence.update', (update) => {
 });
 ```
 
-### groups.update
-Group updates.
+### All Supported Events
 
-```typescript
-sock.ev.on('groups.update', (updates) => {
-    for (const update of updates) {
-        console.log(`Group ${update.id} updated:`, update);
-    }
-});
-```
-
-### group-participants.update
-Group participant changes.
-
-```typescript
-sock.ev.on('group-participants.update', (update) => {
-    console.log(`${update.action} in ${update.id}:`, update.participants);
-});
-```
+| Event | Description |
+|-------|-------------|
+| `connection.update` | Connection status changes |
+| `messages.upsert` | New messages |
+| `messages.update` | Message status updates |
+| `messages.delete` | Deleted messages |
+| `messages.reaction` | Message reactions |
+| `message-receipt.update` | Read receipts |
+| `presence.update` | Presence updates |
+| `contacts.upsert` | New contacts |
+| `contacts.update` | Contact updates |
+| `groups.update` | Group updates |
+| `groups.upsert` | New groups |
+| `group-participants.update` | Participant changes |
+| `chats.upsert` | New chats |
+| `chats.update` | Chat updates |
+| `chats.delete` | Deleted chats |
+| `blocklist.set` | Block list set |
+| `blocklist.update` | Block list update |
+| `labels.edit` | Label edits (Business) |
+| `labels.association` | Label associations |
+| `messaging-history.set` | History sync |
+| `call` | Incoming calls |
 
 ---
 
-## Receiving Webhooks
+## Receiving Webhooks (Optional)
 
-VEX Server sends events via webhook to your backend. Your server **MUST** expose the endpoint `/api/v1/vex/webhooks` to receive these events.
+If you prefer webhook delivery, your server must expose `/api/v1/vex/webhooks`.
 
 ### Express Example
 
@@ -669,23 +714,18 @@ app.use(express.json());
 const sock = makeWASocket({
     url: 'https://your-vex-server.com',
     apiKey: 'my-api-key',
-    backendUrl: 'https://my-server.com'  // Webhooks at /api/v1/vex/webhooks
+    backendUrl: 'https://my-server.com'  // Enables webhook mode
 });
 
-// IMPORTANT: This endpoint path MUST match VEX_WEBHOOK_PATH (/api/v1/vex/webhooks)
+// Webhook endpoint
 app.post(VEX_WEBHOOK_PATH, (req, res) => {
     const { event, data, sessionUUID } = req.body;
-
-    // Inject event into SDK
     sock.injectEvent(event, data);
-
     res.json({ received: true });
 });
 
 app.listen(3000);
 ```
-
-> **WARNING:** If you use a different webhook path, VEX Server will not be able to deliver events to your application. Always use `/api/v1/vex/webhooks`.
 
 ---
 
@@ -701,7 +741,6 @@ try {
 } catch (error) {
     if (error instanceof VexApiError) {
         console.error(`Error ${error.statusCode}: ${error.message}`);
-        console.error('Response:', error.response);
     } else {
         throw error;
     }
@@ -726,7 +765,11 @@ import {
     SessionStats,
     CleanupResult,
     ConnectionStatus,
-    WABotEvents
+    MediaMessageContent,
+    WABotEvents,
+    SocketConnection,
+    SocketConnectionConfig,
+    SocketConnectionEvents
 } from '@vex/client-sdk';
 ```
 

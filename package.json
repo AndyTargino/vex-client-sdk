@@ -47,7 +47,8 @@
     "@whiskeysockets/baileys": "^6.7.16",
     "axios": "^1.7.0",
     "axios-retry": "^4.5.0",
-    "eventemitter3": "^5.0.1"
+    "eventemitter3": "^5.0.1",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
