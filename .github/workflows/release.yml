@@ -1,8 +1,12 @@
-name: Release
+name: Auto Release
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'CHANGELOG.md'
 
 permissions:
   contents: write
@@ -10,10 +14,14 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Skip if commit message contains [skip ci] or is a version bump
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, 'chore(release):')"
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -21,57 +29,136 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build
         run: npm run build
 
-      - name: Get package version
-        id: pkg
-        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+      - name: Run tests
+        run: npm test --if-present
 
-      - name: Check if tag exists
-        id: check_tag
+      - name: Determine version bump and create release
+        id: release
         run: |
-          if git rev-parse "v${{ steps.pkg.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+          # Get current version
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current version: $CURRENT_VERSION"
+
+          # Get the last tag or use initial commit
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found, using initial commit"
+            COMPARE_REF=$(git rev-list --max-parents=0 HEAD)
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            COMPARE_REF=$LAST_TAG
           fi
 
-      - name: Generate changelog
-        if: steps.check_tag.outputs.exists == 'false'
-        id: changelog
-        run: |
-          # Get the last tag or initial commit
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          echo "Comparing from: $COMPARE_REF"
 
-          echo "## What's Changed" > CHANGELOG.md
-          echo "" >> CHANGELOG.md
+          # Analyze commits to determine bump type
+          COMMITS=$(git log ${COMPARE_REF}..HEAD --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
 
-          # List commits since last tag
-          git log ${LAST_TAG}..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
+          MAJOR=0
+          MINOR=0
+          PATCH=0
 
-          echo "" >> CHANGELOG.md
-          echo "" >> CHANGELOG.md
-          echo "## Files Changed" >> CHANGELOG.md
-          echo "" >> CHANGELOG.md
+          while IFS= read -r commit; do
+            # Check for breaking changes
+            if echo "$commit" | grep -qiE "^.*!:|BREAKING CHANGE"; then
+              MAJOR=1
+            # Check for features
+            elif echo "$commit" | grep -qiE "^feat(\(.*\))?:"; then
+              MINOR=1
+            # Check for fixes, perf, refactor
+            elif echo "$commit" | grep -qiE "^(fix|perf|refactor)(\(.*\))?:"; then
+              PATCH=1
+            # Any other commit also triggers patch
+            elif [ -n "$commit" ]; then
+              PATCH=1
+            fi
+          done <<< "$COMMITS"
 
-          # List changed files
-          git diff --name-only ${LAST_TAG}..HEAD | while read file; do
-            echo "- \`$file\`" >> CHANGELOG.md
-          done
+          # Determine new version
+          IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$CURRENT_VERSION"
 
-          cat CHANGELOG.md
+          if [ $MAJOR -eq 1 ]; then
+            NEW_VERSION="$((V_MAJOR + 1)).0.0"
+            BUMP_TYPE="major"
+          elif [ $MINOR -eq 1 ]; then
+            NEW_VERSION="${V_MAJOR}.$((V_MINOR + 1)).0"
+            BUMP_TYPE="minor"
+          elif [ $PATCH -eq 1 ]; then
+            NEW_VERSION="${V_MAJOR}.${V_MINOR}.$((V_PATCH + 1))"
+            BUMP_TYPE="patch"
+          else
+            echo "No version bump needed"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "New version: $NEW_VERSION ($BUMP_TYPE)"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+          # Check if this version tag already exists
+          if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+            echo "Tag v$NEW_VERSION already exists, skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Generate changelog
+          echo "## v$NEW_VERSION" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### What's Changed" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+
+          # Categorize commits
+          echo "#### Features" >> RELEASE_NOTES.md
+          git log ${COMPARE_REF}..HEAD --pretty=format:"- %s (%h)" 2>/dev/null | grep -iE "^- feat(\(.*\))?:" >> RELEASE_NOTES.md || echo "_No new features_" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+
+          echo "#### Bug Fixes" >> RELEASE_NOTES.md
+          git log ${COMPARE_REF}..HEAD --pretty=format:"- %s (%h)" 2>/dev/null | grep -iE "^- fix(\(.*\))?:" >> RELEASE_NOTES.md || echo "_No bug fixes_" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+
+          echo "#### Other Changes" >> RELEASE_NOTES.md
+          git log ${COMPARE_REF}..HEAD --pretty=format:"- %s (%h)" 2>/dev/null | grep -viE "^- (feat|fix)(\(.*\))?:" >> RELEASE_NOTES.md || echo "_No other changes_" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+
+          echo "---" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG:-}...v$NEW_VERSION" >> RELEASE_NOTES.md
+
+          cat RELEASE_NOTES.md
+
+          # Update package.json version
+          npm version $NEW_VERSION --no-git-tag-version --allow-same-version
+
+          # Update package-lock.json
+          npm install --package-lock-only
+
+          # Commit version bump
+          git add package.json package-lock.json
+          git commit -m "chore(release): v$NEW_VERSION [skip ci]"
+          git push origin main
 
       - name: Create Release
-        if: steps.check_tag.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v1
+        if: steps.release.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.pkg.outputs.version }}
-          name: v${{ steps.pkg.outputs.version }}
-          body_path: CHANGELOG.md
+          tag_name: v${{ steps.release.outputs.version }}
+          name: v${{ steps.release.outputs.version }}
+          body_path: RELEASE_NOTES.md
           generate_release_notes: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
