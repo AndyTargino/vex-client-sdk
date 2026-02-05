@@ -1,6 +1,6 @@
 {
   "name": "@vex/client-sdk",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Baileys-compatible SDK client for VEX WhatsApp Microservice",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
