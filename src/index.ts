@@ -10,6 +10,7 @@ import EventEmitter from "eventemitter3";
 import { HttpClient, HttpClientConfig } from "./lib/HttpClient";
 import { WebhookParser } from "./lib/WebhookParser";
 import { SocketConnection, SocketConnectionConfig } from "./lib/SocketConnection";
+import { MessageQueue, MessageQueueConfig, QueuedMessage, getMessageQueue, destroyMessageQueue } from "./lib/MessageQueue";
 
 export type WABotEvents = BaileysEventMap;
 
@@ -154,6 +155,21 @@ export interface VexClientConfig {
         reconnectDelay?: number;
         /** Delay máximo para reconexão em ms (default: 30000) */
         maxReconnectDelay?: number;
+    };
+    /**
+     * Configuração da fila de mensagens (entrega garantida)
+     * Mensagens são salvas em disco quando o servidor está offline
+     * e reenviadas automaticamente quando volta online
+     */
+    messageQueue?: {
+        /** Habilita fila de mensagens (default: true) */
+        enabled?: boolean;
+        /** Diretório para persistir mensagens (default: .vex-queue) */
+        persistDir?: string;
+        /** Máximo de tentativas por mensagem (default: 100) */
+        maxAttempts?: number;
+        /** Tempo máximo para manter mensagem na fila em ms (default: 48 horas) */
+        maxAge?: number;
     };
 }
 
@@ -315,6 +331,10 @@ export class VexClient {
     private _isSocketIOEnabled: boolean = true;
     private _socketIOFailed: boolean = false;
 
+    // Message Queue (entrega garantida)
+    private _messageQueue: MessageQueue | null = null;
+    private _isQueueEnabled: boolean = true;
+
     constructor(config: VexClientConfig) {
         this.config = config;
         this.ev = new EventEmitter();
@@ -343,6 +363,33 @@ export class VexClient {
             off: () => { },
             close: () => this.destroy()
         };
+
+        // Message Queue (entrega garantida)
+        this._isQueueEnabled = config.messageQueue?.enabled !== false;
+        if (this._isQueueEnabled) {
+            this._messageQueue = getMessageQueue({
+                persistDir: config.messageQueue?.persistDir,
+                maxAttempts: config.messageQueue?.maxAttempts,
+                maxAge: config.messageQueue?.maxAge
+            });
+
+            // Conecta a função de envio ao queue
+            this._messageQueue.setSendFunction(async (sessionId, jid, message, options) => {
+                return this.http.post(`/sessions/${sessionId}/messages`, {
+                    to: jid,
+                    message,
+                    options
+                });
+            });
+
+            // Eventos do queue
+            this._messageQueue.on('message:sent', (msg) => {
+                console.log(`[VexSDK] Queued message ${msg.id} sent successfully`);
+            });
+            this._messageQueue.on('message:failed', (msg, error) => {
+                console.error(`[VexSDK] Queued message ${msg.id} failed:`, error.message);
+            });
+        }
 
         // Define user provisório se token existir
         if (this._sessionId) {
@@ -835,6 +882,11 @@ export class VexClient {
         this._isServerOnline = false;
         console.warn('[VexSDK] Server went offline');
 
+        // Notifica o queue
+        if (this._messageQueue) {
+            this._messageQueue.setServerOffline();
+        }
+
         // Emite evento de desconexão
         this.ev.emit("connection.update", {
             connection: "close",
@@ -861,6 +913,11 @@ export class VexClient {
 
         if (wasOffline) {
             console.log('[VexSDK] Server is back online');
+
+            // Notifica o queue para processar mensagens pendentes
+            if (this._messageQueue) {
+                this._messageQueue.setServerOnline();
+            }
         }
     }
 
@@ -1244,6 +1301,8 @@ export class VexClient {
 
     /**
      * Envia mensagens
+     * Se o servidor estiver offline e a fila estiver habilitada,
+     * a mensagem será enfileirada e enviada quando o servidor voltar
      */
     public async sendMessage(
         jid: string,
@@ -1258,21 +1317,50 @@ export class VexClient {
             options: options
         };
 
-        const response = await this.http.post<SendMessageResponse>(
-            `/sessions/${this._sessionId}/messages`,
-            payload
-        );
+        try {
+            const response = await this.http.post<SendMessageResponse>(
+                `/sessions/${this._sessionId}/messages`,
+                payload
+            );
 
-        return {
-            key: {
-                remoteJid: jid,
-                fromMe: true,
-                id: response.messageId
-            },
-            message: content as proto.IMessage,
-            messageTimestamp: response.timestamp ?? Math.floor(Date.now() / 1000),
-            status: proto.WebMessageInfo.Status.PENDING
-        } as proto.WebMessageInfo;
+            return {
+                key: {
+                    remoteJid: jid,
+                    fromMe: true,
+                    id: response.messageId
+                },
+                message: content as proto.IMessage,
+                messageTimestamp: response.timestamp ?? Math.floor(Date.now() / 1000),
+                status: proto.WebMessageInfo.Status.PENDING
+            } as proto.WebMessageInfo;
+
+        } catch (error: any) {
+            // Se é erro de conexão e queue está habilitada, enfileira
+            if (this._isQueueEnabled && this._messageQueue && !this._isServerOnline) {
+                console.log(`[VexSDK] Server offline, queueing message to ${jid}`);
+                const queued = this._messageQueue.enqueue(
+                    this._sessionId!,
+                    jid,
+                    content,
+                    options
+                );
+
+                // Retorna resposta indicando que foi enfileirado
+                return {
+                    key: {
+                        remoteJid: jid,
+                        fromMe: true,
+                        id: queued.id // Usa ID do queue
+                    },
+                    message: content as proto.IMessage,
+                    messageTimestamp: Math.floor(Date.now() / 1000),
+                    status: proto.WebMessageInfo.Status.PENDING
+                } as proto.WebMessageInfo;
+            }
+
+            // Re-lança o erro se não pode enfileirar
+            throw error;
+        }
     }
 
     /**
@@ -1294,6 +1382,7 @@ export class VexClient {
      * Envia mensagem via Socket.IO (mais rápido que HTTP)
      * Usa automaticamente Socket.IO se conectado, caso contrário usa HTTP
      * Suporta arquivos grandes de até 500MB via base64
+     * Se o servidor estiver offline, enfileira para envio posterior
      *
      * @param jid - JID do destinatário (ex: 5511999999999@s.whatsapp.net)
      * @param message - Conteúdo da mensagem
@@ -1314,7 +1403,7 @@ export class VexClient {
         jid: string,
         message: MediaMessageContent,
         timeout?: number
-    ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+    ): Promise<{ success: boolean; messageId?: string; error?: string; queued?: boolean }> {
         this.ensureInitialized();
 
         // Se Socket.IO está conectado, usa ele (mais rápido)
@@ -1322,16 +1411,40 @@ export class VexClient {
             return this._socketConnection.sendMessage(jid, this.buildSocketMessage(message), timeout);
         }
 
-        // Fallback para HTTP
-        const response = await this.http.post<{ messageId: string; status: string }>(
-            `/sessions/${this._sessionId}/messages`,
-            { to: jid, message }
-        );
+        try {
+            // Fallback para HTTP
+            const response = await this.http.post<{ messageId: string; status: string }>(
+                `/sessions/${this._sessionId}/messages`,
+                { to: jid, message }
+            );
 
-        return {
-            success: true,
-            messageId: response.messageId
-        };
+            return {
+                success: true,
+                messageId: response.messageId
+            };
+
+        } catch (error: any) {
+            // Se é erro de conexão e queue está habilitada, enfileira
+            if (this._isQueueEnabled && this._messageQueue && !this._isServerOnline) {
+                console.log(`[VexSDK] Server offline, queueing fast message to ${jid}`);
+                const queued = this._messageQueue.enqueue(
+                    this._sessionId!,
+                    jid,
+                    message
+                );
+
+                return {
+                    success: true,
+                    messageId: queued.id,
+                    queued: true
+                };
+            }
+
+            return {
+                success: false,
+                error: error?.message || 'Unknown error'
+            };
+        }
     }
 
     /**
@@ -1418,6 +1531,38 @@ export class VexClient {
      */
     public get isSocketConnected(): boolean {
         return this._socketConnection?.isConnected ?? false;
+    }
+
+    /**
+     * Retorna estatísticas da fila de mensagens
+     */
+    public getQueueStats(): { totalSessions: number; totalMessages: number; bySession: Record<string, number> } | null {
+        if (!this._messageQueue) return null;
+        return this._messageQueue.getStats();
+    }
+
+    /**
+     * Retorna mensagens pendentes na fila para esta sessão
+     */
+    public getPendingMessages(): QueuedMessage[] {
+        if (!this._messageQueue || !this._sessionId) return [];
+        return this._messageQueue.getPendingMessages(this._sessionId);
+    }
+
+    /**
+     * Limpa a fila de mensagens para esta sessão
+     */
+    public clearMessageQueue(): void {
+        if (this._messageQueue && this._sessionId) {
+            this._messageQueue.clearSession(this._sessionId);
+        }
+    }
+
+    /**
+     * Verifica se a fila de mensagens está habilitada
+     */
+    public get isQueueEnabled(): boolean {
+        return this._isQueueEnabled && this._messageQueue !== null;
     }
 
     /**
@@ -1849,6 +1994,14 @@ export const makeWASocket = (config: VexClientConfig): VexClient => {
 export { WebhookParser } from "./lib/WebhookParser";
 export { HttpClient, HttpClientConfig, VexApiError } from "./lib/HttpClient";
 export { SocketConnection, SocketConnectionConfig, SocketConnectionEvents } from "./lib/SocketConnection";
+export {
+    MessageQueue,
+    MessageQueueConfig,
+    QueuedMessage,
+    MessageQueueEvents,
+    getMessageQueue,
+    destroyMessageQueue
+} from "./lib/MessageQueue";
 
 // Re-export registry functions (já exportadas acima, mas reforçando a documentação)
 // getInstance, hasInstance, destroyInstance, listActiveSessions, destroyAllInstances
