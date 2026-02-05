@@ -349,13 +349,21 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
                     // EXCETO quando é um logout explícito (reason === 'logged_out').
                     // O servidor já está reconectando automaticamente, então não precisamos fazer nada.
                     if (eventName === 'connection.update') {
-                        const data = payload.data as { connection?: string; status?: string; reason?: string };
+                        const data = payload.data as { connection?: string; status?: string; reason?: string; attempts?: number };
 
-                        // Se connection é "close", verifica se é logout explícito
+                        // Se connection é "close", verifica se é logout explícito ou max retries
                         if (data.connection === 'close') {
-                            // ÚNICO caso em que emitimos close: logout explícito do usuário
+                            // Logout explícito do usuário - emite close
                             if (data.reason === 'logged_out') {
                                 console.log('[VexSDK:Socket] User logged out, forwarding close event');
+                                this.emit('baileys:event', eventName, payload.data);
+                                return;
+                            }
+
+                            // Máximo de tentativas de reconexão atingido - emite close
+                            // Isso acontece quando o servidor não consegue conectar ao WhatsApp
+                            if (data.reason === 'max_reconnect_attempts') {
+                                console.log(`[VexSDK:Socket] Max reconnect attempts reached (${data.attempts}), forwarding close event`);
                                 this.emit('baileys:event', eventName, payload.data);
                                 return;
                             }
