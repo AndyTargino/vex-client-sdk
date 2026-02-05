@@ -341,6 +341,41 @@ export class SocketConnection extends EventEmitter<SocketConnectionEvents> {
             this.socket.on(eventName as any, (payload: BaileysEventPayload) => {
                 // Verificar se o evento é para nossa sessão
                 if (payload.sessionUUID === this.config.sessionUUID) {
+                    // FILTRO CRÍTICO: O servidor VEX gerencia TODA a reconexão do Baileys internamente.
+                    // Quando usamos Socket.IO, o cliente SDK NÃO deve reagir a eventos de "close"
+                    // porque isso causaria loops de reconexão (cliente e servidor reconectando ao mesmo tempo).
+                    //
+                    // Estratégia: Via Socket.IO, IGNORAR TODOS os eventos connection.close
+                    // EXCETO quando é um logout explícito (reason === 'logged_out').
+                    // O servidor já está reconectando automaticamente, então não precisamos fazer nada.
+                    if (eventName === 'connection.update') {
+                        const data = payload.data as { connection?: string; status?: string; reason?: string };
+
+                        // Se connection é "close", verifica se é logout explícito
+                        if (data.connection === 'close') {
+                            // ÚNICO caso em que emitimos close: logout explícito do usuário
+                            if (data.reason === 'logged_out') {
+                                console.log('[VexSDK:Socket] User logged out, forwarding close event');
+                                this.emit('baileys:event', eventName, payload.data);
+                                return;
+                            }
+
+                            // TODOS os outros casos de close são ignorados
+                            // O servidor está gerenciando a reconexão internamente
+                            console.log('[VexSDK:Socket] Ignoring close event (server handles reconnection)');
+                            return;
+                        }
+
+                        // Se connection é "open", emite normalmente
+                        if (data.connection === 'open') {
+                            console.log('[VexSDK:Socket] Connection opened');
+                            this.emit('baileys:event', eventName, payload.data);
+                            return;
+                        }
+
+                        // QR code ou outros updates, emite normalmente
+                        console.log('[VexSDK:Socket] connection.update:', JSON.stringify(data));
+                    }
                     this.emit('baileys:event', eventName, payload.data);
                 }
             });

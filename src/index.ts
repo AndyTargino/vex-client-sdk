@@ -687,6 +687,14 @@ export class VexClient {
             return;
         }
 
+        // Se o Socket.IO está conectado e temos uma sessão, não precisa reconectar
+        // O servidor gerencia a conexão Baileys internamente
+        if (this._socketConnection?.isConnected && this._sessionId) {
+            console.log('[VexSDK] Socket.IO is connected, no need to schedule reconnect');
+            this._isReconnecting = false;
+            return;
+        }
+
         // DEBOUNCING: Se já tem reconexão agendada, não agenda outra
         if (this._reconnectTimer) {
             console.log('[VexSDK] Reconnect already scheduled, skipping duplicate');
@@ -727,6 +735,15 @@ export class VexClient {
     private async attemptReconnect(): Promise<void> {
         if (this._isDestroyed) return;
 
+        // Se o Socket.IO está conectado e temos uma sessão, não precisamos reconectar via HTTP
+        // O servidor já está gerenciando a conexão Baileys internamente
+        if (this._socketConnection?.isConnected && this._sessionId) {
+            console.log('[VexSDK] Socket.IO is connected, skipping HTTP reconnect (server manages Baileys)');
+            this._isReconnecting = false;
+            this._reconnectAttempts = 0;
+            return;
+        }
+
         // DEBOUNCING: Atualiza timestamp da última reconexão
         this._lastReconnectTime = Date.now();
         this._reconnectAttempts++;
@@ -756,6 +773,17 @@ export class VexClient {
             console.log('[VexSDK] Reconnected successfully');
 
         } catch (error: any) {
+            // TRATAMENTO ESPECIAL PARA ERRO 500 - Session already being initialized
+            // Isso acontece quando o servidor já está reconectando a sessão internamente
+            if (error?.statusCode === 500 && error?.message?.includes('already being initialized')) {
+                console.log('[VexSDK] Server is already initializing session, waiting...');
+                // Não incrementa tentativas, apenas espera e tenta novamente
+                this._reconnectAttempts = Math.max(0, this._reconnectAttempts - 1);
+                // Espera mais tempo para o servidor terminar
+                setTimeout(() => this.scheduleReconnect(), 5000);
+                return;
+            }
+
             // TRATAMENTO ESPECIAL PARA ERRO 429 (Rate Limited)
             if (error?.statusCode === 429 || error?.message?.includes('429') || error?.message?.includes('Too many')) {
                 // Extrai tempo de espera do erro ou usa 60s como padrão
@@ -791,6 +819,13 @@ export class VexClient {
      */
     private handleServerOffline(): void {
         if (this._isDestroyed) return;
+
+        // Se o Socket.IO está conectado, o servidor provavelmente está online
+        // (apenas uma requisição HTTP falhou temporariamente)
+        if (this._socketConnection?.isConnected) {
+            console.log('[VexSDK] HTTP request failed but Socket.IO is connected, server is likely online');
+            return;
+        }
 
         this._isServerOnline = false;
         console.warn('[VexSDK] Server went offline');
