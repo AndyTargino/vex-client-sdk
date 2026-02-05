@@ -607,6 +607,10 @@ export class VexClient {
 
         // Eventos de status da sessão vindos via Socket.IO
         this._socketConnection.on('session:status', (payload) => {
+            // IMPORTANTE: O servidor VEX gerencia reconexões internamente.
+            // Eventos session:status com 'disconnected' NÃO devem causar close no cliente
+            // a menos que seja um logout real (o servidor envia via connection.update com reason)
+
             // Atualiza estado interno
             if (payload.status === 'connected') {
                 this._connectionStatus = 'open';
@@ -625,11 +629,12 @@ export class VexClient {
                 this._lastQrCode = payload.qrCode;
                 this.ev.emit("connection.update", { qrCode: payload.qrCode });
             } else if (payload.status === 'disconnected' || payload.status === 'timeout') {
-                this._connectionStatus = 'close';
-                this.ev.emit("connection.update", {
-                    connection: "close",
-                    lastDisconnect: { error: new Error(payload.status), date: new Date() }
-                });
+                // NÃO emitir connection: "close" aqui!
+                // O servidor já está reconectando internamente.
+                // Se for logout real, o servidor envia via connection.update com reason="logged_out"
+                console.log(`[VexSDK] Received session:status ${payload.status}, server is handling reconnection`);
+                // Apenas atualiza status interno sem emitir close
+                this._connectionStatus = 'connecting'; // Indica que estamos aguardando reconexão
             } else if (payload.status === 'connecting') {
                 this._connectionStatus = 'connecting';
                 this.ev.emit("connection.update", { connection: "connecting" });
