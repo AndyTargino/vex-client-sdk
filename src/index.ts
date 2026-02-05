@@ -1852,3 +1852,14 @@ export { SocketConnection, SocketConnectionConfig, SocketConnectionEvents } from
 
 // Re-export registry functions (já exportadas acima, mas reforçando a documentação)
 // getInstance, hasInstance, destroyInstance, listActiveSessions, destroyAllInstances
+
+// Webhook Manager - gerenciamento de webhooks internamente no SDK
+export {
+    WebhookManager,
+    WebhookManagerConfig,
+    VexWebhookPayload,
+    WebhookEventCallback,
+    SessionNotFoundCallback,
+    createWebhookMiddleware,
+    processWebhookPayload
+} from "./lib/WebhookManager";
